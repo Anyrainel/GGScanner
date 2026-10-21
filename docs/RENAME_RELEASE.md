@@ -84,8 +84,9 @@ GGScanner/GGScannerOCR assets. The updater prefers canonical assets when the
 API inventory is available, including when a cached manifest names a legacy
 alias. Without inventory, the manifest remains authoritative for older releases;
 without either, canonical names are used. The old repository URL remains only
-as a compatibility discovery fallback. Keep the local checkout folder named
-GOODScanner so existing project paths and related checkouts keep working.
+as a compatibility discovery fallback. The local checkout folder is `GGScanner`;
+related repositories use `../GGScanner`. Remove obsolete worktrees before moving
+the checkout, or repair retained worktree links with `git worktree repair` afterward.
 
 The updater checks the API's asset inventory for the matching edition. If a
 newer release has no matching executable, it shows a manual-download notice

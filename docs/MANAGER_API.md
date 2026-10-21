@@ -774,7 +774,7 @@ All targets execute in a single backpack scan pass. Invalid entries (empty keys,
 
 ### 2026-08-28
 
-- **HTTP errors now follow the configured language.** Every error response keeps the `{ "error": string }` schema and selects either Chinese or English from GOODScanner's current language. Lower-level I/O, JSON, serialization, and job-channel diagnostics follow the localized hint and are preserved verbatim after JSON decoding; dynamic error text is serialized instead of interpolated into JSON source.
+- **HTTP errors now follow the configured language.** Every error response keeps the `{ "error": string }` schema and selects either Chinese or English from GGScanner's current language. Lower-level I/O, JSON, serialization, and job-channel diagnostics follow the localized hint and are preserved verbatim after JSON decoding; dynamic error text is serialized instead of interpolated into JSON source.
 - **Failed job results now explain themselves.** `GET /result` keeps the existing `id` and `status` fields and adds an optional `message` only to failed entries. The configured-language hint comes first; when available, the full underlying error chain follows so users can copy and search it. Successful entries keep their previous two-field shape.
 
 ### 2026-06-14

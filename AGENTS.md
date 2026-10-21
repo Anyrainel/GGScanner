@@ -279,7 +279,7 @@ All help text is bilingual (Chinese + English). Flags are grouped into four sect
 - `yas/src/utils/linux_x11.rs` owns discovery, root-coordinate geometry, focus, TrueColor capture decoding and XTEST; `system_control/linux/` owns XTEST/uinput injection. Linux input access is checked before navigation. No ydotool daemon is used.
 - Wayland uinput needs explicit device permissions; group membership alone does not grant access on every distro. See `docs/LINUX.md` for setup, boundaries and validation evidence.
 - Font discovery and the portal theme watcher compile only on Linux. Keep Windows font selection, system theme handling, scanning timing and stop policy unchanged.
-- Linux CI uploads an experimental build artifact only. Public release assets remain `GOODCapture.exe`, `GOODScanner.exe`, `update.json`.
+- Linux CI uploads an experimental build artifact only. Public release assets are `GGScanner.exe`, `GGScannerOCR.exe`, and `update.json`; temporary compatibility copies expire on 2026-11-21 as specified above.
 
 ## Conventions
 

@@ -1,12 +1,12 @@
 # Honkai: Star Rail support / 《崩坏：星穹铁道》支持
 
-`hsr_scanner` is the Star Rail library linked into the normal `GOODScanner`
-and `GOODCapture` Windows applications. It is not a separate product. The
+`hsr_scanner` is the Star Rail library linked into the normal `GGScannerOCR`
+and `GGScanner` Windows applications. It is not a separate product. The
 shared applications neither require nor launch an HSR-specific executable;
 they keep their existing binary names and let the player switch between
 Genshin Impact and Star Rail.
 
-`hsr_scanner` 是正式 `GOODScanner` 与 `GOODCapture` Windows 程序共用的星穹铁道功能库，
+`hsr_scanner` 是正式 `GGScannerOCR` 与 `GGScanner` Windows 程序共用的星穹铁道功能库，
 不是独立产品。两个共用程序均不要求或启动额外的 HSR 专用程序；程序名称保持不变，玩家可在应用内
 切换《原神》和《崩坏：星穹铁道》。
 
@@ -17,7 +17,7 @@ Genshin Impact and Star Rail.
 - Attended preview/apply management for the reversible lock and discard-mark
   states. Equipped or uncertain gear remains protected, and destructive game
   actions are outside this boundary.
-- In-process read-only capture of completed achievements in `GOODCapture`.
+- In-process read-only capture of completed achievements in `GGScanner`.
   This uses Windows `pktmon` on HSR UDP ports `23301` and `23302`; no helper
   download is required.
 - Versioned [HSR-Scanner v4](../../docs/HSR_EXPORT.md) scanner and capture export for Fribbels
@@ -26,7 +26,7 @@ Genshin Impact and Star Rail.
 - 通过截图扫描角色、光锥、隧洞遗器和位面饰品，并分别记录各分类的覆盖状态。
 - 有人值守的预览/应用管理流程，只处理可逆的锁定与弃置标记。已装备或状态不确定的装备始终受保护，
   分解、删除、消耗、装备等破坏性操作不在功能范围内。
-- `GOODCapture` 可在进程内只读抓取已完成成就。程序通过 Windows `pktmon` 监听 HSR UDP
+- `GGScanner` 可在进程内只读抓取已完成成就。程序通过 Windows `pktmon` 监听 HSR UDP
   端口 `23301` 和 `23302`，无需额外下载辅助程序。
 - 扫描与抓包都导出 [HSR-Scanner v4](../../docs/HSR_EXPORT.md)，供 Fribbels / Reliquary 客户端使用，
   并可附带成就 ID 与开拓者性别/当前命途。
@@ -74,16 +74,16 @@ from the complete public-ID set and conservative structural checks.
 
 ## Build and deterministic verification / 构建与确定性验证
 
-Run from the GOODScanner repository root with Rust 1.89 or newer:
+Run from the GGScanner repository root with Rust 1.89 or newer:
 
-请在 GOODScanner 仓库根目录使用 Rust 1.89 或更高版本运行：
+请在 GGScanner 仓库根目录使用 Rust 1.89 或更高版本运行：
 
 ```powershell
 cargo fmt --all -- --check
 cargo test --locked -p hsr_scanner --all-features
 cargo clippy --locked -p hsr_scanner --all-targets --all-features -- -D warnings
-cargo build --locked --release -p good_tools_app --bin GOODScanner
-cargo build --locked --release -p good_tools_app --bin GOODCapture --features capture
+cargo build --locked --release -p good_tools_app --bin GGScannerOCR
+cargo build --locked --release -p good_tools_app --bin GGScanner --features capture
 ```
 
 The achievement fixtures are synthetic decrypted protobuf-command payloads.
@@ -150,11 +150,11 @@ evaluated fields; model and pool overrides are not shown.
 Both shipped executables expose the same scan path as the GUI:
 
 ```powershell
-.\GOODCapture.exe star-rail check --capture-method wgc --log-file wgc-check.log
-.\GOODCapture.exe star-rail check --capture-method auto --hdr-mode --save-frame hdr.png
-.\GOODCapture.exe star-rail check --capture-method bitblt --drag-character-bar --save-frame drag.png --log-file drag.log
-.\GOODCapture.exe star-rail scan --characters --max-characters 2 --dump-images --log-file characters.log
-.\GOODCapture.exe star-rail scan --light-cones --relics --sample-items 3 --capture-method bitblt --dump-images --log-file inventory.log
+.\GGScanner.exe star-rail check --capture-method wgc --log-file wgc-check.log
+.\GGScanner.exe star-rail check --capture-method auto --hdr-mode --save-frame hdr.png
+.\GGScanner.exe star-rail check --capture-method bitblt --drag-character-bar --save-frame drag.png --log-file drag.log
+.\GGScanner.exe star-rail scan --characters --max-characters 2 --dump-images --log-file characters.log
+.\GGScanner.exe star-rail scan --light-cones --relics --sample-items 3 --capture-method bitblt --dump-images --log-file inventory.log
 ```
 
 `scan` loads saved GUI settings beside the executable. Explicit target flags

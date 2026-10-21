@@ -171,7 +171,7 @@ must stay unresolved until that evidence exists.
 
 ## Reproduce locally
 
-Run from `F:/Codes/genshin/GOODScanner` (paths below remain local):
+Run from `F:/Codes/genshin/GGScanner` (paths below remain local):
 
 ```powershell
 target/debug/examples/analyze_dump.exe F:/Codes/genshin/irminsul/debug_capture/hsr/hsr_1791618385100436700 --raw --dump-dir F:/Codes/genshin/irminsul/debug_capture/hsr/mission_research_decrypted --output-dir F:/Codes/genshin/irminsul/debug_capture/hsr/mission_research_export

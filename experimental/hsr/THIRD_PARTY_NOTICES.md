@@ -1,7 +1,7 @@
 # Third-party notices and research provenance
 
 The `hsr_scanner` library is licensed under GPL-2.0-or-later, as declared in
-this crate's `Cargo.toml`. It is linked into the shared GOODScanner application
+this crate's `Cargo.toml`. It is linked into the shared GGScanner application
 targets and does not produce a separate HSR executable.
 
 ## Native inventory and achievement packet boundary
@@ -43,7 +43,7 @@ Quest counters without retaining them in the completed-achievement export.
 
 ## Embedded normalized reference
 
-GOODScanner and GOODCapture embed a compact normalized snapshot generated from
+GGScannerOCR and GGScanner embed a compact normalized snapshot generated from
 the manifest-verified GIlore/GGStarRail reference boundary at GIlore commit
 `1ca018ee615011e61f90f11c3f47738e6ebac30b` and public source revision
 `8cdb905dc2f8e6fffa9be4eb07af3e34435d6091`. The source manifest SHA-256 is
@@ -70,7 +70,7 @@ it is not a setting that app users need to configure.
   revision `df630a0488a64eeb740e4e0c14f265d96b9f6f8f`, MIT.
 
 These projects provide the interchange export and protocol references described
-below. GOODScanner and GOODCapture do not download, require, or invoke a
+below. GGScannerOCR and GGScanner do not download, require, or invoke a
 Reliquary Archiver helper.
 
 ## GPL-licensed research-only references

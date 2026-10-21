@@ -2,7 +2,7 @@
 
 ## Build Rules
 
-- **NEVER kill GOODScanner.exe or any user process to unblock a build.** If `cargo build` fails with "access denied" because the exe is locked, tell the user and wait. If they confirm the process can be stopped, wait for it to exit on its own or let the user close it.
+- **NEVER kill GGScannerOCR.exe or any user process to unblock a build.** If `cargo build` fails with "access denied" because the exe is locked, tell the user and wait. If they confirm the process can be stopped, wait for it to exit on its own or let the user close it.
 
 ## Prioritization
 
@@ -28,7 +28,7 @@ Yas (Yet Another Scanner) is a Rust application that scans Genshin Impact in-gam
 
 - **`yas`** (`yas_core`) — Platform-agnostic core library: screen capture, OCR (PaddlePaddle ONNX models), system control (mouse/keyboard), game window detection, positioning/scaling utilities.
 - **`genshin`** (`genshin_scanner`) — Genshin-specific scanner logic: GOOD v3 scanners for characters, weapons, and artifacts. Handles in-game navigation, panel OCR, and name matching via remote mappings.
-- **`application`** (`good_tools_app`) — Binary crate. Two user-facing targets: `GOODScanner.exe` (OCR scanner + manager) and `GOODCapture.exe` (capture + OCR scanner + manager, behind the `capture` feature flag).
+- **`application`** (`good_tools_app`) — Binary crate. Two user-facing targets: `GGScannerOCR.exe` (OCR scanner + manager) and `GGScanner.exe` (capture + OCR scanner + manager, behind the `capture` feature flag).
 
 ### Key Modules (genshin)
 
@@ -71,9 +71,9 @@ src/
 
 ```
 src/
-├── main.rs                    # Entry point: CLI mode or GUI mode (GOODScanner.exe)
+├── main.rs                    # Entry point: CLI mode or GUI mode (GGScannerOCR.exe)
 ├── bin/
-│   └── yas.rs                 # Entry point for GOODScanner.exe and GOODCapture.exe
+│   └── yas.rs                 # Entry point for GGScannerOCR.exe and GGScanner.exe
 └── gui/
     ├── mod.rs                 # eframe App impl, tab routing
     ├── state.rs               # AppState: all GUI state fields
@@ -138,15 +138,15 @@ rustup default stable
 # Build
 cargo build --release
 
-# The binary is at target/release/GOODScanner.exe
+# The binary is at target/release/GGScannerOCR.exe
 # Run with default (scan artifacts):
-GOODScanner.exe
+GGScannerOCR.exe
 
 # Scan everything:
-GOODScanner.exe --all
+GGScannerOCR.exe --all
 
 # Scan specific categories:
-GOODScanner.exe --characters --weapons --artifacts
+GGScannerOCR.exe --characters --weapons --artifacts
 ```
 
 Requires administrator privileges on Windows (for input simulation).
@@ -331,14 +331,14 @@ Elixir artifacts display a purple banner ("祝圣之霜定义") that shifts all 
 - `scan_worker`: Generic parallel worker for backpack grid items
 - **ALWAYS create separate pools** for main and substat OCR (sharing causes deadlock: N tasks each hold 1 instance, all waiting for a 2nd)
 
-## GOODCapture (Packet Capture Scanner)
+## GGScanner (Packet Capture Scanner)
 
-GOODCapture is the merged binary (`GOODCapture.exe`) with Capture, Scanner, and Manager tabs. It exports GOOD v3 data either by sniffing game network packets or by OCR. The standalone GOODScanner.exe remains available for users who do not need packet capture.
+GGScanner is the merged binary (`GGScanner.exe`) with Capture, Scanner, and Manager tabs. It exports GOOD v3 data either by sniffing game network packets or by OCR. The standalone GGScannerOCR.exe remains available for users who do not need packet capture.
 
 ### Build
 
 ```bash
-cargo build --release --features capture --bin GOODCapture
+cargo build --release --features capture --bin GGScanner
 ```
 
 ### How It Works
