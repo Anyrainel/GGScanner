@@ -20,10 +20,8 @@ capture = [
     "dep:protobuf",
     "dep:indexmap",
     "dep:base64",
-    "dep:tokio",
     "dep:tokio-util",
     "dep:pktmon",
-    "dep:futures",
 ]
 
 [dependencies]
@@ -46,18 +44,20 @@ indicatif-log-bridge = "0.2"
 zip = "9.0.3"
 tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time"] }
+futures = "0.3"
+sha2 = "0.10"
+flate2 = "1.0"
 
 # capture-only dependencies
 auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "4ba25fac64b88970143af6bc2a2ef51338e620d0", optional = true }
 protobuf = { version = "3.7", optional = true }
 indexmap = { version = "2", optional = true }
 base64 = { version = "0.23.1", optional = true }
-tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # ONNX Runtime .tgz extraction for the Linux auto-download flow.
-flate2 = "1.0"
 tar = "0.4"
 # System-libonnxruntime.so presence probe via the dynamic loader (already a
 # transitive dependency through ort's load-dynamic feature).
@@ -66,4 +66,3 @@ libloading = "0.8"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 pktmon = { version = "0.6", features = ["tokio"], optional = true }
-futures = { version = "0.3", optional = true }

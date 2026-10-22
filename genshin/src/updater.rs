@@ -5,18 +5,20 @@
 //! date with revision zero, so they can discover today's official release.
 //!
 //! **Version check** uses two strategies:
-//!   1. GitHub REST API (`api.github.com`) — fast, structured JSON
-//!   2. Redirect fallback (`/releases/latest` → 302 Location header) —
+//!   1. GitHub REST API (`api.github.com`) — structured JSON
+//!   2. Concurrent redirects (`/releases/latest` → 302 Location header) —
 //!      works through download mirrors when the API is blocked
 //!
-//! **Downloads** use the same mirror chain as the ONNX Runtime download:
-//!   gh-proxy.com → ghfast.top → direct GitHub
+//! External downloads race direct GitHub, gh-proxy.com and ghfast.top.
+//! Losing requests are cancelled as soon as a complete valid artifact wins.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::download;
 use anyhow::{anyhow, Context, Result};
+use futures::FutureExt;
 use serde::Deserialize;
 use yas::{log_debug, log_info, log_warn};
 
@@ -25,13 +27,6 @@ pub const ASSET_SCANNER: &str = "GGScannerOCR.exe";
 /// Asset filename for the merged packet capture + OCR/manager binary.
 pub const ASSET_CAPTURE: &str = "GGScanner.exe";
 pub const RELEASES_URL: &str = "https://github.com/Anyrainel/GGScanner/releases/latest";
-
-/// Download mirror prefixes, tried in order.  Empty string = direct GitHub.
-const DOWNLOAD_MIRRORS: &[&str] = &[
-    "https://gh-proxy.com/",
-    "https://ghfast.top/",
-    "", // direct GitHub
-];
 
 /// Try the future repository first, while supporting the transition release
 /// before the repository is renamed. Old installed updaters still need release
@@ -232,143 +227,121 @@ pub fn current_version_display() -> String {
 
 // ── Tag resolution strategies ────────────────────────────────────
 
-/// Strategy 1: GitHub REST API (fast, works in most regions).
-fn get_tag_via_api() -> Option<ResolvedRelease> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
-        .user_agent("GOODScanner-Updater")
-        .build()
-        .ok()?;
-
-    for &repository in RELEASE_REPOSITORIES {
-        let url = format!("https://api.github.com/repos/{repository}/releases/latest");
-        log_debug!("检查更新(API): {}", "Checking via API: {}", url);
-        let Ok(resp) = client.get(url).send() else {
-            continue;
-        };
-        if !resp.status().is_success() {
-            log_debug!("API 返回: {}", "API returned: {}", resp.status());
-            continue;
-        }
-        let Ok(release) = resp.json::<GitHubRelease>() else {
-            continue;
-        };
-        if parse_calver_tag(&release.tag_name).is_some() {
-            return Some(ResolvedRelease {
-                repository,
-                tag: release.tag_name,
-                revision: release_revision(release.body.as_deref()),
-                assets: ReleaseAssets::default(),
-                published_assets: release.assets,
-            });
-        }
-    }
-    None
-}
-
-/// The daily tag stays compatible with old updaters. A small mirrored asset
-/// carries the revision when the GitHub API is unavailable.
-fn get_build_via_mirrors(repository: &str, tag: &str) -> Option<ReleaseBuild> {
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
-        .user_agent("GOODScanner-Updater")
-        .build()
-    else {
-        return None;
-    };
-    let check = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    for mirror in DOWNLOAD_MIRRORS {
-        let url = format!(
-            "{mirror}https://github.com/{repository}/releases/download/{tag}/update.json?check={check}"
-        );
-        if let Ok(response) = client.get(url).send() {
-            if response.status().is_success() {
-                if let Ok(build) = response.json::<ReleaseBuild>() {
-                    if build.tag == tag {
-                        return Some(build);
+/// Query official API and release redirects concurrently. Compare all responses
+/// within the short budget so a fast but stale proxy cannot hide a newer release.
+fn get_latest_release() -> Option<ResolvedRelease> {
+    download::run(async {
+        let api_client = download::client(true)?;
+        let redirect_client = download::client(false)?;
+        let mut jobs = Vec::new();
+        for &repository in RELEASE_REPOSITORIES {
+            for url in download::github_sources(&format!(
+                "https://api.github.com/repos/{repository}/releases/latest"
+            )) {
+                let client = api_client.clone();
+                jobs.push(
+                    async move {
+                        let bytes = download::get(&client, &url, download::METADATA_LIMIT).await?;
+                        let release: GitHubRelease = serde_json::from_slice(&bytes)?;
+                        anyhow::ensure!(
+                            parse_calver_tag(&release.tag_name).is_some(),
+                            "Invalid release tag"
+                        );
+                        Ok(ResolvedRelease {
+                            repository,
+                            tag: release.tag_name,
+                            revision: release_revision(release.body.as_deref()),
+                            assets: ReleaseAssets::default(),
+                            published_assets: release.assets,
+                        })
                     }
-                }
+                    .boxed(),
+                );
+            }
+            for url in download::github_sources(&format!(
+                "https://github.com/{repository}/releases/latest"
+            )) {
+                let client = redirect_client.clone();
+                jobs.push(
+                    async move {
+                        let tag = follow_release_redirects(&client, &url)
+                            .await
+                            .context("No release redirect")?;
+                        Ok(ResolvedRelease {
+                            repository,
+                            tag,
+                            revision: 0,
+                            assets: ReleaseAssets::default(),
+                            published_assets: None,
+                        })
+                    }
+                    .boxed(),
+                );
             }
         }
-    }
-    None // Legacy releases have no revision asset.
+        let releases = download::collect_valid(jobs).await;
+        select_latest_release(releases).context("All release metadata sources failed")
+    })
+    .ok()
 }
 
-/// Strategy 2: Follow `/releases/latest` redirect through download mirrors.
-///
-/// A repository rename can add redirects before `/releases/tag/vYYYY.MM.DD`.
-/// Follow those hops manually and stop at the tag, without downloading HTML.
-/// Tried through each mirror prefix so it works when github.com is blocked.
-fn get_tag_via_redirect() -> Option<ResolvedRelease> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("GOODScanner-Updater")
-        .build()
-        .ok()?;
+fn select_latest_release(releases: Vec<ResolvedRelease>) -> Option<ResolvedRelease> {
+    releases.into_iter().max_by_key(|release| {
+        (
+            parse_calver_tag(&release.tag).unwrap_or(0),
+            release.revision,
+            release.repository == RELEASE_REPOSITORIES[0],
+            release.published_assets.is_some(),
+        )
+    })
+}
 
-    for &repository in RELEASE_REPOSITORIES {
-        for mirror in DOWNLOAD_MIRRORS {
-            let url = format!("{mirror}https://github.com/{repository}/releases/latest");
-            log_debug!("检查更新(redirect): {}", "Checking via redirect: {}", url);
-            if let Some(tag) = follow_release_redirects(&client, &url) {
-                return Some(ResolvedRelease {
-                    repository,
-                    tag,
-                    revision: 0,
-                    assets: ReleaseAssets::default(),
-                    published_assets: None,
-                });
+/// The pinned-tag manifest is raced across mirrors too. Prefer the largest
+/// revision so a stale same-day proxy never rolls back the advertised build.
+fn get_build_via_mirrors(repository: &str, tag: &str) -> Option<ReleaseBuild> {
+    download::run(async {
+        let client = download::client(true)?;
+        let check = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let urls = download::github_sources(&format!(
+            "https://github.com/{repository}/releases/download/{tag}/update.json?check={check}"
+        ));
+        let builds = download::collect_valid(urls.iter().map(|url| {
+            let client = &client;
+            async move {
+                let bytes = download::get(client, url, download::METADATA_LIMIT).await?;
+                let build: ReleaseBuild = serde_json::from_slice(&bytes)?;
+                anyhow::ensure!(build.tag == tag, "Manifest tag does not match release");
+                Ok(build)
             }
-        }
-    }
-    None
+        }))
+        .await;
+        builds
+            .into_iter()
+            .max_by_key(|build| build.revision)
+            .context("No release manifest")
+    })
+    .ok()
 }
 
-fn follow_release_redirects(client: &reqwest::blocking::Client, url: &str) -> Option<String> {
+async fn follow_release_redirects(client: &reqwest::Client, url: &str) -> Option<String> {
     let mut url = reqwest::Url::parse(url).ok()?;
     for _ in 0..5 {
-        let resp = match client.get(url.clone()).send() {
-            Ok(r) => r,
-            Err(e) => {
-                log_debug!("连接失败: {}", "Connection failed: {}", e);
-                return None;
-            },
-        };
-
-        // Look for 3xx redirect with Location header
-        if !resp.status().is_redirection() {
-            log_debug!(
-                "非重定向响应: {}",
-                "Non-redirect response: {}",
-                resp.status()
-            );
+        let response = download::send(client.get(url.clone())).await.ok()?;
+        if !response.status().is_redirection() {
             return None;
         }
-
-        let location = match resp.headers().get("location") {
-            Some(v) => match v.to_str() {
-                Ok(s) => s.to_string(),
-                Err(_) => return None,
-            },
-            None => return None,
-        };
-
-        if let Some(tag) = extract_tag_from_url(&location) {
-            return Some(tag.to_string());
+        let location = response.headers().get("location")?.to_str().ok()?;
+        if let Some(tag) = extract_tag_from_url(location) {
+            return Some(tag.to_owned());
         }
-        url = url.join(&location).ok()?;
+        url = url.join(location).ok()?;
         if !matches!(url.scheme(), "http" | "https") {
             return None;
         }
     }
-
     None
 }
 
@@ -390,10 +363,8 @@ fn extract_tag_from_url(url: &str) -> Option<&str> {
 
 /// Query GitHub for the latest release and compare with the running version.
 ///
-/// Tries the REST API first (structured, fast), then falls back to the
-/// redirect-based approach through download mirrors (works in China when
-/// `api.github.com` is blocked).
-/// Query GitHub for the latest release and compare with the running version.
+/// Races the REST API and mirrored redirects, comparing available versions
+/// within a bounded window so a stale proxy cannot win by responding first.
 ///
 /// `asset_name` selects which binary to check for (e.g. [`ASSET_SCANNER`] or
 /// [`ASSET_CAPTURE`]).  The download URL in [`UpdateStatus::UpdateAvailable`]
@@ -413,12 +384,7 @@ pub fn check_for_update(asset_name: &str) -> Result<UpdateStatus> {
         None => return Ok(UpdateStatus::DevBuild),
     };
 
-    // Try API first, then redirect fallback
-    let mut release = get_tag_via_api()
-        .or_else(|| {
-            log_debug!("API失败，尝试redirect方式", "API failed, trying redirect");
-            get_tag_via_redirect()
-        })
+    let mut release = get_latest_release()
         .ok_or_else(|| anyhow!("无法获取最新版本信息 / Cannot determine latest version"))?;
 
     // Read the role map even when the API works: it decouples installed
@@ -530,77 +496,18 @@ pub fn download_and_replace(download_url: &str) -> Result<PathBuf> {
         .map_err(|e| anyhow!("无法获取当前程序路径 / Cannot get current exe path: {}", e))?;
     let old_path = exe_path.with_extension("exe.old");
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .connect_timeout(Duration::from_secs(15))
-        .user_agent("GOODScanner-Updater")
-        .build()?;
-
-    let mut last_error = String::new();
-
-    for (i, mirror) in DOWNLOAD_MIRRORS.iter().enumerate() {
-        let url = if mirror.is_empty() {
-            download_url.to_string()
-        } else {
-            format!("{}{}", mirror, download_url)
-        };
-
-        log_info!(
-            "尝试下载源 {}/{}: {}",
-            "Trying source {}/{}: {}",
-            i + 1,
-            DOWNLOAD_MIRRORS.len(),
-            url,
+    let urls = download::github_sources(download_url);
+    let bytes = download::validated_bytes(&urls, 256 * 1024 * 1024, |bytes| {
+        anyhow::ensure!(bytes.get(..2) == Some(b"MZ"), "Not a valid PE executable");
+        anyhow::ensure!(
+            bytes.len() >= MIN_EXE_SIZE,
+            "Release executable is truncated"
         );
-
-        match client.get(&url).send() {
-            Ok(resp) if resp.status().is_success() => match resp.bytes() {
-                Ok(bytes) => {
-                    log_info!("下载完成（{} 字节）", "Downloaded ({} bytes)", bytes.len(),);
-
-                    // Must be a PE executable of plausible size
-                    if bytes.get(..2) != Some(b"MZ") {
-                        last_error = "下载文件不是有效的exe / Not a valid PE executable".into();
-                        log_warn!("{}", "{}", yas::lang::localize(&last_error));
-                        continue;
-                    }
-                    if bytes.len() < MIN_EXE_SIZE {
-                        last_error = format!(
-                            "文件过小（{} 字节 < {} 字节）/ File too small ({} < {} bytes)",
-                            bytes.len(),
-                            MIN_EXE_SIZE,
-                            bytes.len(),
-                            MIN_EXE_SIZE,
-                        );
-                        log_warn!("{}", "{}", yas::lang::localize(&last_error));
-                        continue;
-                    }
-
-                    replace_executable(&exe_path, &old_path, &bytes)?;
-
-                    log_info!("更新完成！请重启程序。", "Update complete! Please restart.");
-                    return Ok(exe_path);
-                },
-                Err(e) => {
-                    last_error = format!("{}", e);
-                    log_warn!("下载失败: {}", "Download failed: {}", last_error);
-                },
-            },
-            Ok(resp) => {
-                last_error = format!("HTTP {}", resp.status());
-                log_warn!("源 {} 失败: {}", "Source {} failed: {}", i + 1, last_error,);
-            },
-            Err(e) => {
-                last_error = format!("{}", e);
-                log_warn!("连接失败: {}", "Connection failed: {}", last_error);
-            },
-        }
-    }
-
-    Err(anyhow!(
-        "所有下载源均失败 / All download sources failed: {}",
-        last_error
-    ))
+        Ok(bytes.to_vec())
+    })?;
+    replace_executable(&exe_path, &old_path, &bytes)?;
+    log_info!("更新完成！请重启程序。", "Update complete! Please restart.");
+    Ok(exe_path)
 }
 
 fn replace_executable(exe_path: &Path, old_path: &Path, bytes: &[u8]) -> Result<()> {
@@ -647,6 +554,45 @@ fn replace_executable(exe_path: &Path, old_path: &Path, bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "live update metadata check; does not download or replace the executable"]
+    fn live_update_metadata() {
+        let release = get_latest_release().expect("valid release metadata");
+        println!(
+            "Latest release: {}/{} revision {}",
+            release.repository, release.tag, release.revision
+        );
+        if let Some(build) = get_build_via_mirrors(release.repository, &release.tag) {
+            println!("Matching manifest revision: {}", build.revision);
+        }
+    }
+
+    #[test]
+    fn stale_fast_mirrors_cannot_hide_newer_releases_or_api_inventory() {
+        let release = |tag: &str, revision, inventory: bool| ResolvedRelease {
+            repository: RELEASE_REPOSITORIES[0],
+            tag: tag.to_owned(),
+            revision,
+            assets: ReleaseAssets::default(),
+            published_assets: inventory.then(Vec::new),
+        };
+        let selected = select_latest_release(vec![
+            release("v2026.10.20", 999, false),
+            release("v2026.10.21", 3, true),
+            release("v2026.10.21", 0, false),
+        ])
+        .unwrap();
+        assert_eq!(selected.tag, "v2026.10.21");
+        assert_eq!(selected.revision, 3);
+        assert!(selected.published_assets.is_some());
+        let selected = select_latest_release(vec![
+            release("v2026.10.21", 0, true),
+            release("v2026.10.21", 0, false),
+        ])
+        .unwrap();
+        assert!(selected.published_assets.is_some());
+    }
 
     #[test]
     fn legacy_and_revised_releases_are_compatible() {
@@ -963,13 +909,15 @@ mod tests {
                         .unwrap();
                 }
             });
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
         assert_eq!(
-            follow_release_redirects(&client, &url).as_deref(),
+            download::run(async { Ok(follow_release_redirects(&client, &url).await) })
+                .unwrap()
+                .as_deref(),
             Some("v2026.10.07")
         );
         worker.join().unwrap();
@@ -992,12 +940,16 @@ mod tests {
                     .unwrap();
             }
         });
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        assert!(follow_release_redirects(&client, &url).is_none());
+        assert!(
+            download::run(async { Ok(follow_release_redirects(&client, &url).await) })
+                .unwrap()
+                .is_none()
+        );
         worker.join().unwrap();
     }
 

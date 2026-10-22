@@ -48,8 +48,11 @@ be installed through the distribution, for example `fonts-noto-cjk` above.
 ONNX Runtime detection uses `ORT_DYLIB_PATH`, an executable-adjacent
 `libonnxruntime.so`, then the system loader. Supply a compatible CPU ONNX Runtime
 1.22 library. Otherwise the GUI downloads it; the CLI prompts first. Automatic
-download is x86_64 only. The archive's versioned regular library is extracted,
-not its empty symlink; incomplete archives are rejected. A configured library
+download is x86_64 only. Huawei/NuGet native libraries and GitHub release mirrors
+race concurrently, with SHA-256 verification before installation. NuGet Range
+requests retrieve only the Linux library; release archives supply the versioned
+regular library, not its empty symlink. See [download policy](DOWNLOADS.md).
+A configured library
 still has to load and support the models: file detection alone is not an
 inference test. An incompatible system install must be replaced or overridden
 with `ORT_DYLIB_PATH`.
