@@ -402,21 +402,12 @@ pub fn show_status(
         super::theme::task_status(ui, lang, feedback.as_ref(), text);
         if stage != Stage::Ready && stage != Stage::Done && capture_targets(settings).any() {
             capture_status::show_connection(ui, lang, stage, shared.has_key_exchange);
-            capture_status::show_diagnostics(
+            capture_status::show_counters(
                 ui,
                 lang,
-                capture_status::Diagnostics {
-                    active: matches!(
-                        state.phase,
-                        CapturePhase::Initializing | CapturePhase::Waiting
-                    ),
-                    ready: shared.listener_ready,
-                    elapsed: shared.elapsed_secs,
-                    packets: shared.packet_count,
-                    commands: shared.command_count,
-                    error: shared.last_transport_error.as_deref(),
-                    details: shared.diagnostics(),
-                },
+                shared.elapsed_secs,
+                shared.packet_count,
+                shared.command_count,
             );
         }
         for (selected, key, zh, en, complete, count) in [

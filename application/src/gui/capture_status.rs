@@ -71,105 +71,22 @@ pub(super) fn show_connection(
     task_progress::row(ui, lang, &step);
 }
 
-pub(super) struct Diagnostics<'a> {
-    pub active: bool,
-    pub ready: bool,
-    pub elapsed: u64,
-    pub packets: usize,
-    pub commands: usize,
-    pub error: Option<&'a str>,
-    pub details: String,
-}
-
-pub(super) fn show_diagnostics(ui: &mut egui::Ui, lang: Lang, data: Diagnostics<'_>) {
-    let hint = if !data.active {
-        lang.t(
-            "本次抓包已结束，以下为停止前的诊断信息。",
-            "Capture ended; diagnostics below describe the last attempt.",
-        )
-    } else if !data.ready {
-        lang.t(
-            "Windows 监听器尚未就绪",
-            "The Windows listener is not ready yet",
-        )
-    } else if data.packets == 0 {
-        lang.t(
-            "监听已启动，尚未收到游戏流量。请在本机启动游戏并登录。",
-            "Listener ready; no game traffic yet. Launch the game on this PC and log in.",
-        )
-    } else if data.commands == 0 {
-        lang.t("已收到流量，尚未成功解码游戏消息。若持续如此，请重新登录并更新抓包器。", "Traffic received; no game messages decoded yet. If this persists, capture a new login and update the scanner.")
-    } else {
-        lang.t(
-            "已成功解码游戏消息，正在识别所选数据。",
-            "Game messages decoded; identifying selected data.",
-        )
-    };
-    ui.label(hint);
+pub(super) fn show_counters(
+    ui: &mut egui::Ui,
+    lang: Lang,
+    elapsed: u64,
+    packets: usize,
+    commands: usize,
+) {
     ui.label(lang.t(
-        &format!(
-            "已等待 {} 秒 · 收到 {} 个包 · 解码 {} 条消息",
-            data.elapsed, data.packets, data.commands
-        ),
-        &format!(
-            "{}s elapsed · {} packets · {} decoded messages",
-            data.elapsed, data.packets, data.commands
-        ),
+        &format!("耗时 {elapsed} 秒 · 收包 {packets} · 解码 {commands}"),
+        &format!("{elapsed}s elapsed · {packets} packets · {commands} decoded messages"),
     ));
-    ui.collapsing(lang.t("抓包诊断", "Capture diagnostics"), |ui| {
-        if let Some(error) = data.error {
-            ui.label(lang.t(
-                "最近一次底层错误（不代表所有包均失败）：",
-                "Last transport error (other packets may have succeeded):",
-            ));
-            ui.label(error);
-        }
-        if ui
-            .button(lang.t("复制诊断信息", "Copy diagnostics"))
-            .clicked()
-        {
-            ui.ctx().copy_text(data.details.clone());
-        }
-        ui.label(lang.t(
-            "日志保存在 log 文件夹的 run_*.log 中。",
-            "Logs are saved as log/run_*.log.",
-        ));
-    });
 }
 
 #[cfg(test)]
 pub(crate) mod feedback_tests {
     use super::*;
-
-    #[test]
-    fn diagnostics_show_actual_traffic_and_decoding_state() {
-        for (ready, packets, commands, expected) in [
-            (false, 0, 0, "listener is not ready yet"),
-            (true, 0, 0, "no game traffic yet"),
-            (true, 10, 0, "no game messages decoded yet"),
-            (true, 10, 3, "Game messages decoded"),
-        ] {
-            let content = texts(|ui| {
-                show_diagnostics(
-                    ui,
-                    Lang::En,
-                    Diagnostics {
-                        active: true,
-                        ready,
-                        elapsed: 15,
-                        packets,
-                        commands,
-                        error: None,
-                        details: String::new(),
-                    },
-                )
-            });
-            assert!(
-                content.iter().any(|text| text.contains(expected)),
-                "{content:?}"
-            );
-        }
-    }
 
     #[test]
     fn handshake_step_never_shows_a_meaningless_item_count() {

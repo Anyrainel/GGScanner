@@ -624,18 +624,12 @@ pub fn show_status(
         tab.phase,
         Phase::Waiting | Phase::Stopped | Phase::Failed(_)
     ) {
-        capture_status::show_diagnostics(
+        capture_status::show_counters(
             ui,
             l,
-            capture_status::Diagnostics {
-                active: matches!(tab.phase, Phase::Waiting),
-                ready: shared.listener_ready,
-                elapsed: shared.elapsed_secs,
-                packets: shared.packet_count,
-                commands: shared.command_count,
-                error: shared.last_transport_error.as_deref(),
-                details: shared.diagnostics(),
-            },
+            shared.elapsed_secs,
+            shared.packet_count,
+            shared.command_count,
         );
     }
     ui.add_enabled_ui(!tab.is_busy() && !game_busy, |ui| {
