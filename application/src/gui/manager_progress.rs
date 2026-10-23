@@ -113,18 +113,5 @@ pub fn show(
             lang.t("未完成", "Unfinished"),
             summary.errors + summary.aborted + summary.not_found
         ));
-        if result.results.iter().any(|r| r.message.is_some()) {
-            egui::CollapsingHeader::new(lang.t("请求详情", "Request details")).show(ui, |ui| {
-                for result in &result.results {
-                    if let Some(message) = &result.message {
-                        ui.label(&result.id);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut message.as_str())
-                                .desired_width(f32::INFINITY),
-                        );
-                    }
-                }
-            });
-        }
     }
 }

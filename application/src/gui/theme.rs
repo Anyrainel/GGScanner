@@ -275,12 +275,6 @@ pub fn task_status(ui: &mut egui::Ui, lang: Lang, status: Option<&TaskStatus>, i
             super::widgets::export_location(ui, path);
         },
         Some(TaskStatus::Failed(error)) => {
-            ui.label(
-                RichText::new(lang.t("任务未完成", "Task did not finish"))
-                    .size(16.0)
-                    .strong()
-                    .color(ui.visuals().error_fg_color),
-            );
             super::widgets::error_card(ui, lang, error);
         },
         _ => {

@@ -1302,6 +1302,17 @@ where
                 artifact_snapshot,
                 invalidates_cache,
             } => {
+                for instruction in &result.results {
+                    if let Some(message) = &instruction.message {
+                        yas::log_warn!(
+                            "管理请求 {} / {}：{}",
+                            "Manager request {} / {}: {}",
+                            job_id,
+                            instruction.id,
+                            yas::lang::localize(message)
+                        );
+                    }
+                }
                 // Update artifact cache based on scan completeness
                 match artifact_snapshot {
                     Some(snapshot) => {

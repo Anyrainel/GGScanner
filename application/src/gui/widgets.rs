@@ -126,7 +126,7 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Only task details scroll. Keep export choices and Start/Stop reachable even
-/// at the minimum window height or when a diagnostic disclosure is expanded.
+/// at the minimum window height.
 pub fn status_content(
     ui: &mut egui::Ui,
     id: &str,
@@ -173,24 +173,15 @@ pub fn partial_export_hint(
                 .any(|step| step.key == *key && step.completed >= *limit)
     });
     if limit_reached {
-        lang.t(
-            "已达到扫描上限，当前结果已导出。提高“扫描上限”后可继续扫描。",
-            "A scan limit was reached, and the results collected so far were exported. Increase the Scan limits to scan more.",
-        )
+        lang.t("已达到扫描上限。", "Scan limit reached.")
     } else if progress
         .steps
         .iter()
         .any(|step| step.state == super::task_progress::StepState::Interrupted)
     {
-        lang.t(
-            "有类别未完整扫描，已导出其余结果。请查看下方未完成的类别；如果游戏界面切换较慢，可在“延迟设置”中增加等待时间后重试。",
-            "Some categories did not finish, so the completed results were exported. Check the unfinished categories below. If the game was slow to change screens, increase the delays in Timing and retry.",
-        )
+        lang.t("部分扫描未完成。", "Some categories did not finish.")
     } else {
-        lang.t(
-            "扫描未完整结束，当前结果已导出。",
-            "The scan did not finish completely; the results collected so far were exported.",
-        )
+        lang.t("扫描未完成。", "Scan incomplete.")
     }
 }
 
@@ -237,11 +228,9 @@ pub fn manager_debug_options(
     });
 }
 
-/// Render every user-visible failure with the same information hierarchy:
-/// a localized hint first, then copyable diagnostics behind a native disclosure.
+/// Show a concise failure reason with an action to copy the full diagnostic.
 pub fn error_card(ui: &mut egui::Ui, l: Lang, error: &UiError) {
     let hint = error.hint_text(l);
-    let technical_details = error.technical_details(l);
     let copy_text = error.copy_text(l);
 
     ui.scope(|ui| {
@@ -261,14 +250,6 @@ pub fn error_card(ui: &mut egui::Ui, l: Lang, error: &UiError) {
             {
                 ui.ctx().copy_text(copy_text.clone());
             }
-        });
-        egui::CollapsingHeader::new(l.t("错误详情", "Error details")).show_unindented(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut technical_details.as_str())
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(technical_details.lines().count().clamp(2, 6)),
-            );
         });
     });
 }
