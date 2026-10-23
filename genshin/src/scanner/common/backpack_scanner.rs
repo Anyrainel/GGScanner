@@ -11,7 +11,7 @@ use super::capture_frame::CaptureFrame;
 use super::constants::*;
 use super::coord_scaler::CoordScaler;
 use super::debug_dump::{next_filter_dump_index, DumpCollector};
-use super::game_controller::GenshinGameController;
+use super::game_controller::{panel_frames_similar, GenshinGameController};
 #[cfg(test)]
 use super::grid_icon_detector::ITEMS_PER_PAGE;
 use super::grid_voter::GridVoteSchedule;
@@ -857,11 +857,28 @@ pub struct BackpackScanner<'a> {
     pages_scrolled: u32,
 }
 
-#[derive(Debug, Clone)]
-struct ConfirmedGridCell {
-    row: usize,
-    col: usize,
-    samples: Vec<u8>,
+/// Occupancy evidence must not navigate away from the item being captured.
+/// Known occupied icons also cover distinct artifacts with identical panels.
+fn matches_occupied_cell(candidate_samples: Option<&[u8]>, occupied_samples: &[Vec<u8>]) -> bool {
+    candidate_samples.is_some_and(|candidate| {
+        occupied_samples
+            .iter()
+            .any(|occupied| visual_samples_similar(candidate, occupied))
+    })
+}
+
+fn timed_out_cell_occupied(
+    candidate_samples: Option<&[u8]>,
+    occupied_samples: &[Vec<u8>],
+    previous_panel: Option<&[u8]>,
+    current_panel: &[u8],
+) -> Option<bool> {
+    if matches_occupied_cell(candidate_samples, occupied_samples) {
+        return Some(true);
+    }
+    previous_panel
+        .filter(|previous| !previous.is_empty() && previous.len() == current_panel.len())
+        .map(|previous| !panel_frames_similar(previous, current_panel))
 }
 
 impl<'a> BackpackScanner<'a> {
@@ -1028,68 +1045,40 @@ impl<'a> BackpackScanner<'a> {
     /// Re-check a cell whose fast substat panel did not change.
     ///
     /// A visually matching occupied card is independent evidence that the candidate
-    /// is occupied. Otherwise, temporarily select a confirmed occupied anchor,
-    /// establish a wide-panel baseline, and re-select the candidate. An empty
-    /// cell leaves the anchor panel unchanged; a real artifact changes some
-    /// part of the wider detail panel even when its substat crop was identical.
+    /// is occupied. Otherwise compare the settled wide panel with the screenshot
+    /// saved before this click. Never select an earlier item while capture is
+    /// continuing: that changes the panel underneath the OCR pipeline.
     fn confirm_timed_out_cell_occupied(
         &mut self,
-        row: usize,
-        col: usize,
         candidate_samples: Option<&[u8]>,
         occupied_samples: &[Vec<u8>],
-        anchors: &[ConfirmedGridCell],
+        previous_panel: Option<&[u8]>,
         timeout_ms: u64,
-        initial_wait_ms: u64,
     ) -> Result<Option<bool>> {
-        if candidate_samples.is_some_and(|candidate| {
-            occupied_samples
-                .iter()
-                .any(|occupied| visual_samples_similar(candidate, occupied))
-        }) {
+        if matches_occupied_cell(candidate_samples, occupied_samples) {
             return Ok(Some(true));
         }
 
-        for anchor in anchors.iter().take(3) {
-            self.ctrl.click_at(
-                GRID_FIRST_X + anchor.col as f64 * GRID_OFFSET_X,
-                GRID_FIRST_Y + anchor.row as f64 * GRID_OFFSET_Y,
-            );
-            if initial_wait_ms > 0 {
-                utils::sleep(initial_wait_ms as u32);
-            }
-            self.ctrl.reset_panel_fingerprint();
+        let occupancy_result = (|| -> Result<_> {
             self.ctrl
                 .ensure_panel_stable(OCCUPANCY_PANEL_RECT, timeout_ms.max(100))?;
-
-            self.ctrl.click_at(
-                GRID_FIRST_X + col as f64 * GRID_OFFSET_X,
-                GRID_FIRST_Y + row as f64 * GRID_OFFSET_Y,
-            );
-            let occupancy_result = self.ctrl.wait_until_panel_loaded(
-                OCCUPANCY_PANEL_RECT,
-                timeout_ms,
-                initial_wait_ms,
-            );
-            // wait_until_panel_loaded stores the wide rectangle in the
-            // controller's shared snapshot. Always restore the normal fast
-            // rectangle before the next grid click, even when the wide check
-            // itself failed.
-            let baseline_result = self
-                .ctrl
-                .ensure_panel_stable(PANEL_POOL_RECT, timeout_ms.max(100));
-            let occupied = occupancy_result?;
-            baseline_result?;
-            if occupied {
-                return Ok(Some(true));
-            }
-        }
-
-        if anchors.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(false))
-        }
+            let (x, y, w, h) = OCCUPANCY_PANEL_RECT;
+            let current = self.ctrl.capture_region(x, y, w, h)?;
+            Ok(timed_out_cell_occupied(
+                candidate_samples,
+                occupied_samples,
+                previous_panel,
+                current.as_raw(),
+            ))
+        })();
+        // The controller has one fingerprint buffer; restore its normal rect
+        // even when the wide-panel capture fails.
+        let baseline_result = self
+            .ctrl
+            .ensure_panel_stable(PANEL_POOL_RECT, timeout_ms.max(100));
+        let occupied = occupancy_result?;
+        baseline_result?;
+        Ok(occupied)
     }
 
     fn capture_game_with_retry(&self) -> Result<RgbImage> {
@@ -1417,18 +1406,30 @@ impl<'a> BackpackScanner<'a> {
 
                 let mut stopped = false;
                 let mut page_item_idx: usize = 0; // position within this page
-                let mut confirmed_cells: Vec<ConfirmedGridCell> = Vec::new();
                 if let Some((probe_row, probe_col)) = confirmed_probe_cell {
                     let probe_page_idx = (probe_row - start_row) * GRID_COLS + probe_col;
                     if let Some(samples) = page_cell_samples.get(probe_page_idx) {
-                        confirmed_cells.push(ConfirmedGridCell {
-                            row: probe_row,
-                            col: probe_col,
-                            samples: samples.clone(),
-                        });
                         remember_occupied_samples(&mut occupied_cell_samples, samples);
                     }
                 }
+                // Reset after every page/probe/lock callback, which may change
+                // selection. Later baselines come from the actual item captures.
+                let mut previous_panel = if config.detect_empty_cells {
+                    let (x, y, w, h) = OCCUPANCY_PANEL_RECT;
+                    match self.ctrl.capture_region(x, y, w, h) {
+                        Ok(panel) => Some(panel.into_raw()),
+                        Err(e) => {
+                            log_warn!(
+                                "[backpack] 无法保存面板参照；不会将未变化的面板视为空格子: {}",
+                                "[backpack] Could not save the panel baseline; an unchanged panel will not prove an empty cell: {}",
+                                e
+                            );
+                            None
+                        },
+                    }
+                } else {
+                    None
+                };
                 'page: for cur_row in start_row..row {
                     let row_item_count = if scanned_row == total_row - 1 {
                         last_row_col
@@ -1529,9 +1530,8 @@ impl<'a> BackpackScanner<'a> {
                         }
 
                         // An unchanged fast panel is only a suspicion. Re-check
-                        // it against independently confirmed occupied cells and
-                        // a much wider detail-panel region before concluding
-                        // that the candidate is empty.
+                        // it against known occupied icons and the saved wider
+                        // detail panel before concluding the candidate is empty.
                         //
                         // Exception: the first cell was selected to seed the
                         // initial panel baseline. Until a successful page probe
@@ -1547,21 +1547,15 @@ impl<'a> BackpackScanner<'a> {
                             && !panel_loaded
                             && !preselected_first_cell
                         {
-                            let (timeout_ms, initial_wait_ms) = match &config.panel_wait {
-                                PanelWaitMode::Fingerprint {
-                                    timeout_ms,
-                                    initial_wait_ms,
-                                } => (*timeout_ms, *initial_wait_ms),
-                                PanelWaitMode::FixedDelay { delay_ms } => ((*delay_ms).max(100), 0),
+                            let timeout_ms = match &config.panel_wait {
+                                PanelWaitMode::Fingerprint { timeout_ms, .. } => *timeout_ms,
+                                PanelWaitMode::FixedDelay { delay_ms } => (*delay_ms).max(100),
                             };
                             match self.confirm_timed_out_cell_occupied(
-                                cur_row,
-                                col,
                                 candidate_samples.map(Vec::as_slice),
                                 &occupied_cell_samples,
-                                &confirmed_cells,
+                                previous_panel.as_deref(),
                                 timeout_ms,
-                                initial_wait_ms,
                             ) {
                                 Ok(Some(true)) => {
                                     log_debug!(
@@ -1597,8 +1591,8 @@ impl<'a> BackpackScanner<'a> {
                                 },
                                 Ok(None) => {
                                     log_warn!(
-                                        "[backpack] 快速面板未变化且本页尚无独立占用证据；跳过此位置但继续扫描 (idx={})",
-                                        "[backpack] The fast panel was unchanged and this page has no independent occupancy evidence yet; skipping this position but continuing (idx={})",
+                                        "[backpack] 快速面板未变化且缺少可用的占用参照；跳过此位置但继续扫描 (idx={})",
+                                        "[backpack] The fast panel was unchanged and no usable occupancy baseline is available; skipping this position but continuing (idx={})",
                                         scanned_count
                                     );
                                     missed_count += 1;
@@ -1638,6 +1632,10 @@ impl<'a> BackpackScanner<'a> {
                                     "[backpack] capture failed: {}",
                                     e
                                 );
+                                // Selection may have changed without a usable
+                                // capture; don't compare the next item with a
+                                // stale baseline from two positions ago.
+                                previous_panel = None;
                                 missed_count += 1;
                                 scanned_count += 1;
                                 page_item_idx += 1;
@@ -1646,18 +1644,10 @@ impl<'a> BackpackScanner<'a> {
                         };
 
                         if config.detect_empty_cells {
+                            previous_panel = frame
+                                .crop(OCCUPANCY_PANEL_RECT, 0.0, &self.ctrl.scaler)
+                                .map(RgbImage::into_raw);
                             if let Some(samples) = candidate_samples {
-                                if !confirmed_cells
-                                    .iter()
-                                    .any(|cell| visual_samples_similar(&cell.samples, samples))
-                                    && confirmed_cells.len() < 3
-                                {
-                                    confirmed_cells.push(ConfirmedGridCell {
-                                        row: cur_row,
-                                        col,
-                                        samples: samples.clone(),
-                                    });
-                                }
                                 remember_occupied_samples(&mut occupied_cell_samples, samples);
                             }
                         }
@@ -1807,6 +1797,37 @@ mod tests {
     use image::Rgb;
 
     use super::*;
+
+    #[test]
+    fn occupancy_uses_saved_wide_panel_without_reselecting_earlier_items() {
+        let previous = vec![40; 3_000];
+        let mut different_item = previous.clone();
+        // Name/main-stat changes can lie outside the fast substat fingerprint.
+        different_item[..300].fill(180);
+        assert_eq!(
+            timed_out_cell_occupied(None, &[], Some(&previous), &different_item),
+            Some(true)
+        );
+        assert_eq!(
+            timed_out_cell_occupied(None, &[], Some(&previous), &previous),
+            Some(false)
+        );
+        assert_eq!(timed_out_cell_occupied(None, &[], None, &previous), None);
+        assert_eq!(
+            timed_out_cell_occupied(None, &[], Some(&previous[..30]), &previous),
+            None
+        );
+    }
+
+    #[test]
+    fn identical_panels_remain_occupied_when_the_grid_icon_is_known() {
+        let panel = vec![40; 3_000];
+        let icon = vec![100; 300];
+        assert_eq!(
+            timed_out_cell_occupied(Some(&icon), &[icon.clone()], Some(&panel), &panel),
+            Some(true)
+        );
+    }
 
     #[test]
     fn failed_item_position_respects_partial_tail_pages_and_page_boundaries() {
