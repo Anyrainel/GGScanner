@@ -65,6 +65,15 @@ pub const ITEMS_PER_PAGE: usize = 40;
 const CARD_W: f64 = 123.5; // 247 / 2
 const CARD_H: f64 = 153.0; // 306 / 2
 
+/// Visual card centers, which differ from the deliberately inset legacy click
+/// spacing. Use these for selection-rim/occupancy evidence, not click geometry.
+pub fn artifact_cell_center(row: usize, col: usize) -> (f64, f64) {
+    (
+        GRID_CX + col as f64 * GRID_OX,
+        GRID_CY + row as f64 * GRID_OY,
+    )
+}
+
 /// Width of the bright band above each row gap used for Y edge detection.
 /// Narrow bands produce sharper Y peaks. 10px at 1080p = 20px at 4K.
 const EDGE_W: f64 = 10.0;

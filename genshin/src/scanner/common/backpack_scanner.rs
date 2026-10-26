@@ -7,13 +7,12 @@ use yas::ocr::ImageToText;
 use yas::utils;
 
 use super::annotator;
+use super::artifact_panel::{ArtifactCell, ArtifactPanelOptions, ArtifactSelection};
 use super::capture_frame::CaptureFrame;
 use super::constants::*;
 use super::coord_scaler::CoordScaler;
 use super::debug_dump::{next_filter_dump_index, DumpCollector};
-use super::game_controller::{panel_frames_similar, GenshinGameController};
-#[cfg(test)]
-use super::grid_icon_detector::ITEMS_PER_PAGE;
+use super::game_controller::GenshinGameController;
 use super::grid_voter::GridVoteSchedule;
 use super::pixel_utils;
 
@@ -307,29 +306,6 @@ fn visual_samples_similar(first: &[u8], second: &[u8]) -> bool {
     let len = first.len() as f64;
     excess_diff_sum as f64 / len <= MAX_MEAN_EXCESS_DIFF
         && changed_bytes as f64 / len <= MAX_CHANGED_BYTE_RATIO
-}
-
-fn remember_occupied_samples(known: &mut Vec<Vec<u8>>, candidate: &[u8]) {
-    const MAX_KNOWN_OCCUPIED_CELLS: usize = 16;
-
-    if known
-        .iter()
-        .any(|samples| visual_samples_similar(samples, candidate))
-    {
-        return;
-    }
-    if known.len() == MAX_KNOWN_OCCUPIED_CELLS {
-        known.remove(0);
-    }
-    known.push(candidate.to_vec());
-}
-
-fn seeded_first_cell_is_preselected(
-    page_start_idx: usize,
-    page_item_idx: usize,
-    probe_changed_selection: bool,
-) -> bool {
-    page_start_idx == 0 && page_item_idx == 0 && !probe_changed_selection
 }
 
 fn visual_end_is_authoritative(scanned_count: usize, minimum_count: usize) -> bool {
@@ -724,10 +700,11 @@ pub enum GridEvent {
 pub enum PanelWaitMode {
     /// Fixed delay then stability check (for weapons — identical items have identical panels).
     FixedDelay { delay_ms: u64 },
-    /// Fingerprint-based detection: wait until panel content differs from previous AND is stable.
-    Fingerprint {
+    /// Shared artifact selection, readiness checking and bounded recovery.
+    Artifact {
         timeout_ms: u64,
         initial_wait_ms: u64,
+        stop_on_failure: bool,
     },
 }
 
@@ -736,7 +713,7 @@ pub struct BackpackScanConfig {
     pub delay_scroll: u64,
     /// How to wait for the detail panel to load after clicking a grid item.
     pub panel_wait: PanelWaitMode,
-    /// Extra delay (ms) after panel is ready, before capture.
+    /// Minimum stable hold for artifacts; post-wait delay for weapons.
     pub extra_delay: u64,
     /// When set, most grid items capture only this rect. Items at the
     /// page-relative indices produced by `grid_vote_schedule` still capture
@@ -750,13 +727,12 @@ pub struct BackpackScanConfig {
     pub probe_last_cell_per_page: bool,
     /// Enable duplicate grid cell detection. When true, at the start of each
     /// page the grid cells are sampled. If a cell matches the previous
-    /// cell, the panel wait is skipped entirely (for FixedDelay mode) or uses
-    /// a shorter timeout (for Fingerprint mode).
+    /// cell, the fixed weapon delay is skipped. Artifact readiness never uses
+    /// grid-icon similarity to shorten its normal observation window.
     pub detect_grid_duplicates: bool,
-    /// When true, detect empty grid cells by checking if the detail panel
-    /// failed to change after clicking (wait_until_panel_loaded returns
-    /// false). On empty cell: skip the probe (don't SkipPage) and stop
-    /// item scanning. Also enables stuck-page detection after scroll.
+    /// Enable controlled empty-cell confirmation after artifact selection
+    /// times out, and verified page scrolling. An unchanged panel alone is
+    /// never empty-cell evidence.
     /// Used by LockManager when filter_involved_sets is active, because
     /// the game's item count display shows total capacity (not filtered
     /// count) after filtering, making `total` unreliable.
@@ -773,20 +749,11 @@ pub struct BackpackScanConfig {
 /// Top at y=478 avoids the lock icon area (y=428) whose fade-in animation
 /// would prevent fingerprint stabilization.
 const PANEL_POOL_RECT: (f64, f64, f64, f64) = (1330.0, 478.0, 370.0, 187.0);
-/// Wider, settled detail-panel region used only to confirm whether a timed-out
-/// cell is occupied. It includes the item name, main stat, substats, set, and
-/// state icons, making two different occupied cards much less likely to look
-/// identical than the fast substat-only pool.
-const OCCUPANCY_PANEL_RECT: (f64, f64, f64, f64) = (1310.0, 110.0, 480.0, 860.0);
-
 // NOTE: The full right-panel detail area (covering all OCR + pixel-check
 // regions for both artifacts and weapons, with 10px margin) is approximately:
 //   (1310, 110, 480, 860)  — right edge at 1790, bottom at 970.
 // Artifact scans use this as a partial capture; grid voting still needs full
 // window at the schedule positions for the current page size.
-
-/// Fast timeout for duplicate items in Fingerprint mode (e.g., identical weapons).
-const PANEL_LOAD_FAST_TIMEOUT_MS: u64 = 100;
 
 fn capture_item_frame(
     ctrl: &GenshinGameController,
@@ -855,30 +822,6 @@ pub struct BackpackScanner<'a> {
     ctrl: &'a mut GenshinGameController,
     /// Number of pages scrolled so far (for correction tracking).
     pages_scrolled: u32,
-}
-
-/// Occupancy evidence must not navigate away from the item being captured.
-/// Known occupied icons also cover distinct artifacts with identical panels.
-fn matches_occupied_cell(candidate_samples: Option<&[u8]>, occupied_samples: &[Vec<u8>]) -> bool {
-    candidate_samples.is_some_and(|candidate| {
-        occupied_samples
-            .iter()
-            .any(|occupied| visual_samples_similar(candidate, occupied))
-    })
-}
-
-fn timed_out_cell_occupied(
-    candidate_samples: Option<&[u8]>,
-    occupied_samples: &[Vec<u8>],
-    previous_panel: Option<&[u8]>,
-    current_panel: &[u8],
-) -> Option<bool> {
-    if matches_occupied_cell(candidate_samples, occupied_samples) {
-        return Some(true);
-    }
-    previous_panel
-        .filter(|previous| !previous.is_empty() && previous.len() == current_panel.len())
-        .map(|previous| !panel_frames_similar(previous, current_panel))
 }
 
 impl<'a> BackpackScanner<'a> {
@@ -1042,45 +985,6 @@ impl<'a> BackpackScanner<'a> {
         unreachable!("verified scroll retry loop always returns")
     }
 
-    /// Re-check a cell whose fast substat panel did not change.
-    ///
-    /// A visually matching occupied card is independent evidence that the candidate
-    /// is occupied. Otherwise compare the settled wide panel with the screenshot
-    /// saved before this click. Never select an earlier item while capture is
-    /// continuing: that changes the panel underneath the OCR pipeline.
-    fn confirm_timed_out_cell_occupied(
-        &mut self,
-        candidate_samples: Option<&[u8]>,
-        occupied_samples: &[Vec<u8>],
-        previous_panel: Option<&[u8]>,
-        timeout_ms: u64,
-    ) -> Result<Option<bool>> {
-        if matches_occupied_cell(candidate_samples, occupied_samples) {
-            return Ok(Some(true));
-        }
-
-        let occupancy_result = (|| -> Result<_> {
-            self.ctrl
-                .ensure_panel_stable(OCCUPANCY_PANEL_RECT, timeout_ms.max(100))?;
-            let (x, y, w, h) = OCCUPANCY_PANEL_RECT;
-            let current = self.ctrl.capture_region(x, y, w, h)?;
-            Ok(timed_out_cell_occupied(
-                candidate_samples,
-                occupied_samples,
-                previous_panel,
-                current.as_raw(),
-            ))
-        })();
-        // The controller has one fingerprint buffer; restore its normal rect
-        // even when the wide-panel capture fails.
-        let baseline_result = self
-            .ctrl
-            .ensure_panel_stable(PANEL_POOL_RECT, timeout_ms.max(100));
-        let occupied = occupancy_result?;
-        baseline_result?;
-        Ok(occupied)
-    }
-
     fn capture_game_with_retry(&self) -> Result<RgbImage> {
         match self.ctrl.capture_game() {
             Ok(image) => Ok(image),
@@ -1155,63 +1059,20 @@ impl<'a> BackpackScanner<'a> {
             last_row_col
         );
 
-        // Click the first grid position to ensure focus
-        self.ctrl.click_at(GRID_FIRST_X, GRID_FIRST_Y);
-
-        // When detecting empty cells, seed a fresh baseline from the first
-        // item's stable panel. Never reuse a snapshot from an earlier scan or
-        // a different rectangle.
-        if config.detect_empty_cells {
-            let (settle_ms, timeout_ms) = match &config.panel_wait {
-                PanelWaitMode::FixedDelay { delay_ms } => (*delay_ms, 100),
-                PanelWaitMode::Fingerprint {
-                    timeout_ms,
-                    initial_wait_ms,
-                } => (*initial_wait_ms, *timeout_ms),
-            };
-            if settle_ms > 0 {
-                utils::sleep(settle_ms as u32);
-            }
-            if let Err(first_error) = self
-                .ctrl
-                .ensure_panel_stable(PANEL_POOL_RECT, timeout_ms.max(100))
-            {
-                log_warn!(
-                    "[backpack] 初始面板基线截图失败，将重试: {}",
-                    "[backpack] initial panel-baseline capture failed, retrying: {}",
-                    first_error
-                );
-                utils::sleep(50);
-                if let Err(e) = self
-                    .ctrl
-                    .ensure_panel_stable(PANEL_POOL_RECT, timeout_ms.max(100))
-                {
-                    log_error!(
-                        "[backpack] 无法建立初始面板基线: {}",
-                        "[backpack] could not establish the initial panel baseline: {}",
-                        e
-                    );
-                    return ScanGridOutcome {
-                        termination: ScanTermination::CaptureFailure,
-                        scanned_count: 0,
-                        missed_count: 1,
-                        skipped_count: 0,
-                    };
-                }
-            }
+        // A previous run or tab must never supply the first readiness baseline.
+        self.ctrl.reset_artifact_panel();
+        if matches!(config.panel_wait, PanelWaitMode::FixedDelay { .. }) {
+            self.ctrl.click_at(GRID_FIRST_X, GRID_FIRST_Y);
         }
-
-        let row = GRID_ROWS.min(total_row);
         let mut scanned_row: usize = 0;
         let mut scanned_count: usize = 0;
         let mut start_row: usize = 0;
         let mut termination = ScanTermination::Exhausted;
         let mut missed_count: usize = 0;
         let mut skipped_count: usize = 0;
-        let mut occupied_cell_samples: Vec<Vec<u8>> = Vec::new();
-        // Per-page grid cell samples for duplicate and occupancy detection.
-        // Index within this vec = position on visible page.
         let mut page_cell_samples: Vec<Vec<u8>> = Vec::new();
+
+        let row = GRID_ROWS.min(total_row);
 
         // Skip pages by scrolling
         if start_at > 0 {
@@ -1244,8 +1105,6 @@ impl<'a> BackpackScanner<'a> {
             let page_start_idx = scanned_count;
             let mut page_had_items = false;
             let mut skip_page = false;
-            let mut confirmed_probe_cell: Option<(usize, usize)> = None;
-            let mut probe_changed_selection = false;
 
             // --- Optional page probe: click bottom-right new cell, capture, ask callback. ---
             if config.probe_last_cell_per_page {
@@ -1260,89 +1119,66 @@ impl<'a> BackpackScanner<'a> {
                 };
                 let x = GRID_FIRST_X + probe_col as f64 * GRID_OFFSET_X;
                 let y = GRID_FIRST_Y + probe_screen_row as f64 * GRID_OFFSET_Y;
-                self.ctrl.click_at(x, y);
-                let mut probe_panel_loaded = true;
-                let mut probe_wait_failed = false;
-                match &config.panel_wait {
-                    PanelWaitMode::FixedDelay { delay_ms } => {
-                        utils::sleep(*delay_ms as u32);
-                        if let Err(e) = self.ctrl.ensure_panel_stable(PANEL_POOL_RECT, 100) {
-                            log_error!(
-                                "[backpack] 探测面板稳定检查失败: {}",
-                                "[backpack] probe panel stability check failed: {}",
-                                e
-                            );
-                            probe_wait_failed = true;
-                        }
-                    },
-                    PanelWaitMode::Fingerprint {
+                let probe = match &config.panel_wait {
+                    PanelWaitMode::Artifact {
                         timeout_ms,
                         initial_wait_ms,
-                    } => {
-                        match self.ctrl.wait_until_panel_loaded(
-                            PANEL_POOL_RECT,
-                            *timeout_ms,
-                            *initial_wait_ms,
+                        ..
+                    } => self.ctrl.select_artifact(
+                        ArtifactCell {
+                            row: probe_screen_row,
+                            col: probe_col,
+                        },
+                        ArtifactPanelOptions {
+                            timeout_ms: *timeout_ms,
+                            initial_wait_ms: *initial_wait_ms,
+                            extra_delay_ms: config.extra_delay,
+                        },
+                        true,
+                    ),
+                    PanelWaitMode::FixedDelay { delay_ms } => {
+                        self.ctrl.click_at(x, y);
+                        utils::sleep(*delay_ms as u32);
+                        self.ctrl
+                            .capture_game()
+                            .map(|image| ArtifactSelection::Ready(CaptureFrame::full(image)))
+                    },
+                };
+                match probe {
+                    Ok(ArtifactSelection::Ready(frame)) => {
+                        match callback(
+                            &mut *self.ctrl,
+                            GridEvent::PageStarted {
+                                page_start_idx,
+                                last_cell_image: frame.image,
+                            },
                         ) {
-                            Ok(loaded) => probe_panel_loaded = loaded,
-                            Err(e) => {
-                                log_error!(
-                                    "[backpack] 探测面板加载检查失败: {}",
-                                    "[backpack] probe panel load check failed: {}",
-                                    e
-                                );
-                                probe_wait_failed = true;
+                            ScanAction::Continue => {},
+                            ScanAction::SkipPage => skip_page = true,
+                            ScanAction::Stop => {
+                                termination = ScanTermination::CallbackStop;
+                                break 'outer;
                             },
                         }
                     },
+                    Ok(ArtifactSelection::Cancelled) => {
+                        termination = ScanTermination::Cancelled;
+                        break 'outer;
+                    },
+                    Ok(_) => {
+                        log_warn!(
+                            "[backpack] 页末详情未确认，将逐项扫描本页",
+                            "[backpack] Page probe detail was unconfirmed; scanning each item"
+                        );
+                    },
+                    Err(e) => {
+                        log_warn!(
+                            "[backpack] 页末探测截图失败，将逐项扫描本页: {}",
+                            "[backpack] Page probe capture failed; scanning each item: {}",
+                            e
+                        );
+                    },
                 }
-                // Empty cell detection: if the panel didn't change after
-                // clicking, the probed cell is likely empty. Skip the probe
-                // and scan the page normally.
-                if probe_wait_failed {
-                    log_warn!(
-                        "[backpack] 无法确认页末探测位置，将禁用本页快速跳过并逐项扫描",
-                        "[backpack] Could not confirm the page probe; disabling the page-skip shortcut and scanning each item"
-                    );
-                } else if config.detect_empty_cells && !probe_panel_loaded {
-                    log_debug!(
-                        "[backpack] 探测点击后面板未变化，可能为空格子，正常扫描此页 (page_start={})",
-                        "[backpack] Panel unchanged after probe click, likely empty cell, scanning page normally (page_start={})",
-                        page_start_idx
-                    );
-                } else {
-                    probe_changed_selection = true;
-                    confirmed_probe_cell = Some((probe_screen_row, probe_col));
-                    if config.extra_delay > 0 {
-                        utils::sleep(config.extra_delay as u32);
-                    }
-                    match self.ctrl.capture_game() {
-                        Ok(image) => {
-                            let action = callback(
-                                &mut *self.ctrl,
-                                GridEvent::PageStarted {
-                                    page_start_idx,
-                                    last_cell_image: image,
-                                },
-                            );
-                            match action {
-                                ScanAction::Continue => {},
-                                ScanAction::SkipPage => skip_page = true,
-                                ScanAction::Stop => {
-                                    termination = ScanTermination::CallbackStop;
-                                    break 'outer;
-                                },
-                            }
-                        },
-                        Err(e) => {
-                            log_error!(
-                                "[backpack] 探测截图失败: {}",
-                                "[backpack] probe capture failed: {}",
-                                e
-                            );
-                        },
-                    }
-                } // else: probe_panel_loaded or !detect_empty_cells
             }
 
             if skip_page {
@@ -1406,30 +1242,6 @@ impl<'a> BackpackScanner<'a> {
 
                 let mut stopped = false;
                 let mut page_item_idx: usize = 0; // position within this page
-                if let Some((probe_row, probe_col)) = confirmed_probe_cell {
-                    let probe_page_idx = (probe_row - start_row) * GRID_COLS + probe_col;
-                    if let Some(samples) = page_cell_samples.get(probe_page_idx) {
-                        remember_occupied_samples(&mut occupied_cell_samples, samples);
-                    }
-                }
-                // Reset after every page/probe/lock callback, which may change
-                // selection. Later baselines come from the actual item captures.
-                let mut previous_panel = if config.detect_empty_cells {
-                    let (x, y, w, h) = OCCUPANCY_PANEL_RECT;
-                    match self.ctrl.capture_region(x, y, w, h) {
-                        Ok(panel) => Some(panel.into_raw()),
-                        Err(e) => {
-                            log_warn!(
-                                "[backpack] 无法保存面板参照；不会将未变化的面板视为空格子: {}",
-                                "[backpack] Could not save the panel baseline; an unchanged panel will not prove an empty cell: {}",
-                                e
-                            );
-                            None
-                        },
-                    }
-                } else {
-                    None
-                };
                 'page: for cur_row in start_row..row {
                     let row_item_count = if scanned_row == total_row - 1 {
                         last_row_col
@@ -1455,26 +1267,83 @@ impl<'a> BackpackScanner<'a> {
                             continue;
                         }
 
-                        // Click the grid item
-                        let x = GRID_FIRST_X + col as f64 * GRID_OFFSET_X;
-                        let y = GRID_FIRST_Y + cur_row as f64 * GRID_OFFSET_Y;
-                        self.ctrl.click_at(x, y);
-
-                        // Is this cell a known duplicate of the previous?
-                        let is_duplicate = config.detect_grid_duplicates
-                            && page_item_idx > 0
-                            && page_item_idx < page_cell_samples.len()
-                            && visual_samples_similar(
-                                &page_cell_samples[page_item_idx],
-                                &page_cell_samples[page_item_idx - 1],
-                            );
-                        let candidate_samples = page_cell_samples.get(page_item_idx);
-
-                        // Wait for panel to load based on configured mode
-                        let mut panel_loaded = true;
-                        let mut panel_wait_failed = false;
-                        match &config.panel_wait {
+                        let frame = match &config.panel_wait {
+                            PanelWaitMode::Artifact {
+                                timeout_ms,
+                                initial_wait_ms,
+                                stop_on_failure,
+                            } => {
+                                let full_capture = config.detail_panel_rect.is_none()
+                                    || (config.grid_vote_schedule)(page_items)
+                                        .indices
+                                        .contains(&page_item_idx);
+                                let selected = self.ctrl.select_artifact(
+                                    ArtifactCell { row: cur_row, col },
+                                    ArtifactPanelOptions {
+                                        timeout_ms: *timeout_ms,
+                                        initial_wait_ms: *initial_wait_ms,
+                                        extra_delay_ms: config.extra_delay,
+                                    },
+                                    full_capture,
+                                );
+                                match selected {
+                                    Ok(ArtifactSelection::Ready(frame)) => frame,
+                                    Ok(ArtifactSelection::Cancelled) => {
+                                        termination = ScanTermination::Cancelled;
+                                        stopped = true;
+                                        break 'page;
+                                    },
+                                    Ok(ArtifactSelection::Empty)
+                                        if config.detect_empty_cells
+                                            && visual_end_is_authoritative(
+                                                scanned_count,
+                                                config.min_items_before_visual_end,
+                                            ) =>
+                                    {
+                                        termination = ScanTermination::EmptyCell;
+                                        stopped = true;
+                                        break 'page;
+                                    },
+                                    other => {
+                                        match other {
+                                            Err(e) => log_error!(
+                                                "[backpack] 圣遗物详情确认失败 (idx={}): {}",
+                                                "[backpack] Artifact detail confirmation failed (idx={}): {}", scanned_count, e
+                                            ),
+                                            _ => log_warn!(
+                                                "[backpack] 无法确认圣遗物详情，未提交OCR (idx={})",
+                                                "[backpack] Artifact detail unconfirmed; no OCR submitted (idx={})", scanned_count
+                                            ),
+                                        }
+                                        missed_count += 1;
+                                        if *stop_on_failure {
+                                            // Diagnostic relocation is only
+                                            // allowed once capture is stopping.
+                                            self.ctrl.click_at(
+                                                GRID_FIRST_X + col as f64 * GRID_OFFSET_X,
+                                                GRID_FIRST_Y + cur_row as f64 * GRID_OFFSET_Y,
+                                            );
+                                            termination = ScanTermination::CaptureFailure;
+                                            stopped = true;
+                                            break 'page;
+                                        }
+                                        scanned_count += 1;
+                                        page_item_idx += 1;
+                                        continue;
+                                    },
+                                }
+                            },
                             PanelWaitMode::FixedDelay { delay_ms } => {
+                                let x = GRID_FIRST_X + col as f64 * GRID_OFFSET_X;
+                                let y = GRID_FIRST_Y + cur_row as f64 * GRID_OFFSET_Y;
+                                self.ctrl.click_at(x, y);
+                                let is_duplicate = config.detect_grid_duplicates
+                                    && page_item_idx > 0
+                                    && page_item_idx < page_cell_samples.len()
+                                    && visual_samples_similar(
+                                        &page_cell_samples[page_item_idx],
+                                        &page_cell_samples[page_item_idx - 1],
+                                    );
                                 if !is_duplicate {
                                     utils::sleep(*delay_ms as u32);
                                     if let Err(e) =
@@ -1485,172 +1354,33 @@ impl<'a> BackpackScanner<'a> {
                                             "[backpack] panel stability check failed: {}",
                                             e
                                         );
-                                        panel_wait_failed = true;
+                                        missed_count += 1;
                                     }
                                 }
-                            },
-                            PanelWaitMode::Fingerprint {
-                                timeout_ms,
-                                initial_wait_ms,
-                            } => {
-                                let timeout = if is_duplicate && !config.detect_empty_cells {
-                                    PANEL_LOAD_FAST_TIMEOUT_MS
-                                } else {
-                                    *timeout_ms
-                                };
-                                match self.ctrl.wait_until_panel_loaded(
-                                    PANEL_POOL_RECT,
-                                    timeout,
-                                    *initial_wait_ms,
+                                if config.extra_delay > 0 {
+                                    utils::sleep(config.extra_delay as u32);
+                                }
+                                match capture_item_frame(
+                                    self.ctrl,
+                                    config,
+                                    page_item_idx,
+                                    page_items,
                                 ) {
-                                    Ok(loaded) => panel_loaded = loaded,
+                                    Ok(frame) => frame,
                                     Err(e) => {
                                         log_error!(
-                                            "[backpack] 面板加载检查失败: {}",
-                                            "[backpack] panel load check failed: {}",
+                                            "[backpack] 截图失败: {}",
+                                            "[backpack] capture failed: {}",
                                             e
-                                        );
-                                        panel_wait_failed = true;
-                                    },
-                                }
-                            },
-                        }
-
-                        if panel_wait_failed {
-                            missed_count += 1;
-                            if config.detect_empty_cells {
-                                termination = ScanTermination::CaptureFailure;
-                                stopped = true;
-                                break 'page;
-                            }
-                            // Non-filtered artifact/weapon scans historically
-                            // proceeded to the item capture after a transient
-                            // wait error. Preserve that behavior: the capture
-                            // itself remains the authoritative fallible step.
-                        }
-
-                        // An unchanged fast panel is only a suspicion. Re-check
-                        // it against known occupied icons and the saved wider
-                        // detail panel before concluding the candidate is empty.
-                        //
-                        // Exception: the first cell was selected to seed the
-                        // initial panel baseline. Until a successful page probe
-                        // changes selection, re-clicking that cell cannot change
-                        // the panel and must not be mistaken for an empty slot.
-                        let preselected_first_cell = seeded_first_cell_is_preselected(
-                            page_start_idx,
-                            page_item_idx,
-                            probe_changed_selection,
-                        );
-                        if config.detect_empty_cells
-                            && !is_duplicate
-                            && !panel_loaded
-                            && !preselected_first_cell
-                        {
-                            let timeout_ms = match &config.panel_wait {
-                                PanelWaitMode::Fingerprint { timeout_ms, .. } => *timeout_ms,
-                                PanelWaitMode::FixedDelay { delay_ms } => (*delay_ms).max(100),
-                            };
-                            match self.confirm_timed_out_cell_occupied(
-                                candidate_samples.map(Vec::as_slice),
-                                &occupied_cell_samples,
-                                previous_panel.as_deref(),
-                                timeout_ms,
-                            ) {
-                                Ok(Some(true)) => {
-                                    log_debug!(
-                                        "[backpack] 快速面板未变化，但占用确认成功，继续扫描 (idx={})",
-                                        "[backpack] Fast panel was unchanged, but occupancy was confirmed; continuing (idx={})",
-                                        scanned_count
-                                    );
-                                },
-                                Ok(Some(false)) => {
-                                    if !visual_end_is_authoritative(
-                                        scanned_count,
-                                        config.min_items_before_visual_end,
-                                    ) {
-                                        log_warn!(
-                                            "[backpack] 在已读取数量之前出现疑似空格子；跳过该位置并继续扫描 (idx={}, 最低数量={})",
-                                            "[backpack] A suspected empty cell appeared before the observed count; skipping that position and continuing (idx={}, minimum={})",
-                                            scanned_count,
-                                            config.min_items_before_visual_end
                                         );
                                         missed_count += 1;
                                         scanned_count += 1;
                                         page_item_idx += 1;
                                         continue;
-                                    }
-                                    log_debug!(
-                                        "[backpack] 多重确认后检测到空格子，停止扫描 (idx={})",
-                                        "[backpack] Empty cell confirmed after independent checks, stopping (idx={})",
-                                        scanned_count
-                                    );
-                                    termination = ScanTermination::EmptyCell;
-                                    stopped = true;
-                                    break 'page;
-                                },
-                                Ok(None) => {
-                                    log_warn!(
-                                        "[backpack] 快速面板未变化且缺少可用的占用参照；跳过此位置但继续扫描 (idx={})",
-                                        "[backpack] The fast panel was unchanged and no usable occupancy baseline is available; skipping this position but continuing (idx={})",
-                                        scanned_count
-                                    );
-                                    missed_count += 1;
-                                    scanned_count += 1;
-                                    page_item_idx += 1;
-                                    continue;
-                                },
-                                Err(e) => {
-                                    log_error!(
-                                        "[backpack] 空格子确认截图失败: {}",
-                                        "[backpack] empty-cell confirmation capture failed: {}",
-                                        e
-                                    );
-                                    missed_count += 1;
-                                    termination = ScanTermination::CaptureFailure;
-                                    stopped = true;
-                                    break 'page;
-                                },
-                            }
-                        }
-
-                        // Extra delay after panel ready
-                        if config.extra_delay > 0 {
-                            utils::sleep(config.extra_delay as u32);
-                        }
-
-                        let frame = match capture_item_frame(
-                            self.ctrl,
-                            config,
-                            page_item_idx,
-                            page_items,
-                        ) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                log_error!(
-                                    "[backpack] 截图失败: {}",
-                                    "[backpack] capture failed: {}",
-                                    e
-                                );
-                                // Selection may have changed without a usable
-                                // capture; don't compare the next item with a
-                                // stale baseline from two positions ago.
-                                previous_panel = None;
-                                missed_count += 1;
-                                scanned_count += 1;
-                                page_item_idx += 1;
-                                continue;
+                                    },
+                                }
                             },
                         };
-
-                        if config.detect_empty_cells {
-                            previous_panel = frame
-                                .crop(OCCUPANCY_PANEL_RECT, 0.0, &self.ctrl.scaler)
-                                .map(RgbImage::into_raw);
-                            if let Some(samples) = candidate_samples {
-                                remember_occupied_samples(&mut occupied_cell_samples, samples);
-                            }
-                        }
 
                         page_had_items = true;
                         let action = callback(
@@ -1769,12 +1499,7 @@ impl<'a> BackpackScanner<'a> {
                 break 'outer;
             }
 
-            // Reset fingerprint after scroll — new page means panel content changed.
-            // Skip reset when detecting empty cells: keeping the previous panel
-            // snapshot as baseline allows detecting empty cells on the new page.
-            if !config.detect_empty_cells {
-                self.ctrl.reset_panel_fingerprint();
-            }
+            self.ctrl.reset_artifact_panel();
 
             let action = callback(&mut *self.ctrl, GridEvent::PageScrolled);
             if matches!(action, ScanAction::Stop) {
@@ -1797,37 +1522,6 @@ mod tests {
     use image::Rgb;
 
     use super::*;
-
-    #[test]
-    fn occupancy_uses_saved_wide_panel_without_reselecting_earlier_items() {
-        let previous = vec![40; 3_000];
-        let mut different_item = previous.clone();
-        // Name/main-stat changes can lie outside the fast substat fingerprint.
-        different_item[..300].fill(180);
-        assert_eq!(
-            timed_out_cell_occupied(None, &[], Some(&previous), &different_item),
-            Some(true)
-        );
-        assert_eq!(
-            timed_out_cell_occupied(None, &[], Some(&previous), &previous),
-            Some(false)
-        );
-        assert_eq!(timed_out_cell_occupied(None, &[], None, &previous), None);
-        assert_eq!(
-            timed_out_cell_occupied(None, &[], Some(&previous[..30]), &previous),
-            None
-        );
-    }
-
-    #[test]
-    fn identical_panels_remain_occupied_when_the_grid_icon_is_known() {
-        let panel = vec![40; 3_000];
-        let icon = vec![100; 300];
-        assert_eq!(
-            timed_out_cell_occupied(Some(&icon), &[icon.clone()], Some(&panel), &panel),
-            Some(true)
-        );
-    }
 
     #[test]
     fn failed_item_position_respects_partial_tail_pages_and_page_boundaries() {
@@ -2144,14 +1838,6 @@ mod tests {
             None
         );
         assert_eq!(scroll_states_similar(&state, &mismatched_band_column), None);
-    }
-
-    #[test]
-    fn seeded_first_cell_remains_preselected_without_a_successful_probe() {
-        assert!(seeded_first_cell_is_preselected(0, 0, false));
-        assert!(!seeded_first_cell_is_preselected(0, 0, true));
-        assert!(!seeded_first_cell_is_preselected(0, 1, false));
-        assert!(!seeded_first_cell_is_preselected(ITEMS_PER_PAGE, 0, false));
     }
 
     #[test]

@@ -105,6 +105,56 @@ mod tests {
         assert_eq!(items, [12, 13]);
         assert_eq!(indices, [12, 13]);
     }
+
+    #[test]
+    fn skipped_capture_indices_preserve_later_successes_and_ocr_error_policy() {
+        let (sender, worker) = start_worker(false, |item: WorkItem<()>| {
+            if item.index == 5 {
+                anyhow::bail!("unreadable captured artifact");
+            }
+            Ok(Some(item.index))
+        });
+        // Missing 0/1 and holes in the middle model skipped readiness failures.
+        for index in [2, 5, 8] {
+            sender
+                .send(WorkItem {
+                    index,
+                    frame: CaptureFrame::full(image::RgbImage::new(1, 1)),
+                    metadata: (),
+                    grid_annotation: None,
+                })
+                .unwrap();
+        }
+        drop(sender);
+        let (items, indices) = worker
+            .join(|_| panic!("continue policy relocated the mouse"))
+            .unwrap();
+        assert_eq!(items, [2, 8]);
+        assert_eq!(indices, [2, 8]);
+    }
+
+    #[test]
+    fn stop_policy_reports_an_ocr_failure_after_a_skipped_capture() {
+        let (sender, worker) =
+            start_worker(true, |_: WorkItem<()>| -> anyhow::Result<Option<()>> {
+                anyhow::bail!("failure after missing screenshot");
+            });
+        sender
+            .send(WorkItem {
+                index: 5,
+                frame: CaptureFrame::full(image::RgbImage::new(1, 1)),
+                metadata: (),
+                grid_annotation: None,
+            })
+            .unwrap();
+        drop(sender);
+        let mut focused = None;
+        let error = worker.join(|index| focused = Some(index)).unwrap_err();
+        assert_eq!(focused, Some(5));
+        assert!(error
+            .to_string()
+            .contains("failure after missing screenshot"));
+    }
 }
 
 /// Handle to a running worker. Call `join()` to wait for results.
@@ -258,6 +308,27 @@ where
         let mut index_map: Vec<usize> = Vec::new();
         let mut processed: usize = 0;
         let mut capture_total: Option<usize> = None;
+        let mut collect = |current_index, result: anyhow::Result<Option<R>>| match result {
+            Ok(Some(item)) => {
+                output.push(item);
+                index_map.push(current_index);
+            },
+            Ok(None) => {},
+            Err(e) => {
+                log_error!(
+                    "[worker] 第{}项错误: {:#}",
+                    "[worker] item {} error: {:#}",
+                    current_index,
+                    e
+                );
+                if stop_on_failure {
+                    worker_failure.lock().unwrap().get_or_insert_with(|| {
+                        (current_index, format!("item {current_index}: {e:#}"))
+                    });
+                    should_stop_clone.store(true, Ordering::Relaxed);
+                }
+            },
+        };
 
         for event in result_rx {
             match event {
@@ -274,29 +345,7 @@ where
                         let current_index = next_index;
                         next_index += 1;
 
-                        match result {
-                            Ok(Some(item)) => {
-                                output.push(item);
-                                index_map.push(current_index);
-                            },
-                            Ok(None) => {
-                                // Skipped item
-                            },
-                            Err(e) => {
-                                log_error!(
-                                    "[worker] 第{}项错误: {:#}",
-                                    "[worker] item {} error: {:#}",
-                                    current_index,
-                                    e
-                                );
-                                if stop_on_failure {
-                                    worker_failure.lock().unwrap().get_or_insert_with(|| {
-                                        (current_index, format!("item {current_index}: {e:#}"))
-                                    });
-                                    should_stop_clone.store(true, Ordering::Relaxed);
-                                }
-                            },
-                        }
+                        collect(current_index, result);
                     }
                 },
                 WorkerEvent::CaptureFinished { total } => {
@@ -306,14 +355,11 @@ where
             }
         }
 
-        // Drain any remaining buffered results
-        while let Some(result) = results_map.remove(&next_index) {
-            let current_index = next_index;
-            next_index += 1;
-            if let Ok(Some(item)) = result {
-                output.push(item);
-                index_map.push(current_index);
-            }
+        // Some grid positions never produce work (unconfirmed panel/capture).
+        // At EOF there can be legitimate holes, so drain all remaining keys in
+        // order rather than waiting forever for a missing screenshot index.
+        for (index, result) in results_map {
+            collect(index, result);
         }
 
         let _ = dispatch_handle.join();

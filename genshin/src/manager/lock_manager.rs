@@ -8,6 +8,9 @@ use yas::{log_debug, log_info, log_warn};
 use super::ui_actions::{d_action, d_cell};
 use crate::scanner::artifact::GoodArtifactScanner;
 use crate::scanner::common::annotator;
+use crate::scanner::common::artifact_panel::{
+    ArtifactCell, ArtifactPanelOptions, ArtifactSelection,
+};
 use crate::scanner::common::backpack_scanner::{
     self, BackpackScanConfig, BackpackScanner, GridEvent, PanelWaitMode, ScanAction,
     ScanTermination,
@@ -212,9 +215,6 @@ fn update_scanned_lock_state(
         }
     }
 }
-
-/// Panel pool rect for wait_until_panel_loaded (same as backpack_scanner).
-const PANEL_POOL_RECT: (f64, f64, f64, f64) = (1330.0, 478.0, 370.0, 187.0);
 
 type OcrResult = (usize, usize, usize, Option<GoodArtifact>);
 
@@ -589,9 +589,10 @@ impl LockManager {
         // when a max target level has been computed (fast mode).
         let scan_config = BackpackScanConfig {
             delay_scroll,
-            panel_wait: PanelWaitMode::Fingerprint {
+            panel_wait: PanelWaitMode::Artifact {
                 timeout_ms: panel_timeout,
                 initial_wait_ms: initial_wait,
+                stop_on_failure: false,
             },
             extra_delay: capture_delay,
             detail_panel_rect: None,
@@ -601,7 +602,7 @@ impl LockManager {
             // inventory capacity and use visual occupancy/page-end evidence to
             // find the real boundary. This also handles filtered inventories,
             // whose header keeps showing the unfiltered count.
-            detect_grid_duplicates: true,
+            detect_grid_duplicates: false,
             detect_empty_cells: true,
             min_items_before_visual_end: visual_end_floor(
                 scan_bounds.observed_count,
@@ -883,24 +884,39 @@ impl LockManager {
 
                         let action_idx = lock_action_counter;
                         lock_action_counter += 1;
-                        let x = GRID_FIRST_X + action.col as f64 * GRID_OFFSET_X;
-                        let y = GRID_FIRST_Y + action.row as f64 * GRID_OFFSET_Y;
-                        ctrl_cb.click_at(x, y);
-                        let _ = ctrl_cb.wait_until_panel_loaded(PANEL_POOL_RECT, panel_timeout, initial_wait);
-                        yas::utils::sleep(d_cell());
-
-                        let mut panel_image = match ctrl_cb.capture_game() {
-                            Ok(img) => img,
-                            Err(e) => {
-                                log_warn!("[lock_manager] 面板确认截图失败: {}", "[lock_manager] Panel confirmation capture failed: {}", e);
+                        let mut panel_image = match ctrl_cb.select_artifact(
+                            ArtifactCell { row: action.row, col: action.col },
+                            ArtifactPanelOptions {
+                                timeout_ms: panel_timeout,
+                                initial_wait_ms: initial_wait,
+                                // Lock icons animate separately from text.
+                                extra_delay_ms: capture_delay.max(d_cell() as u64),
+                            },
+                            true,
+                        ) {
+                            Ok(ArtifactSelection::Ready(frame)) => frame.image,
+                            Ok(ArtifactSelection::Cancelled) => {
+                                results.insert(
+                                    action.result_id.clone(),
+                                    InstructionResult::failure(
+                                        action.result_id.clone(), InstructionStatus::Aborted,
+                                        "用户已停止此锁定操作。",
+                                        "This lock operation was stopped by the user.", None,
+                                    ),
+                                );
+                                continue;
+                            },
+                            other => {
+                                let error = other.err();
+                                log_warn!("[lock_manager] 目标详情未确认，跳过锁定操作", "[lock_manager] Target detail unconfirmed; skipping lock operation");
                                 results.insert(
                                     action.result_id.clone(),
                                     InstructionResult::failure(
                                         action.result_id.clone(),
                                         InstructionStatus::UiError,
-                                        "无法读取目标圣遗物的详情画面，因此没有更改锁定状态。",
-                                        "The target artifact's detail panel could not be captured, so its lock state was not changed.",
-                                        Some(&e),
+                                        "无法确认目标圣遗物的详情已加载，因此没有更改锁定状态。",
+                                        "The target artifact's detail panel could not be confirmed ready, so its lock state was not changed.",
+                                        error.as_ref(),
                                     ),
                                 );
                                 continue;

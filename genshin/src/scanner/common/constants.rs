@@ -39,9 +39,9 @@ pub const DEFAULT_DELAY_GRID_ITEM: u64 = 125;
 pub const DEFAULT_WEAPON_PANEL_DELAY: u64 = 50;
 /// Artifact: initial wait (ms) after click before starting panel detection.
 pub const DEFAULT_ARTIFACT_INITIAL_WAIT: u64 = 20;
-/// Artifact: timeout (ms) for fingerprint-based panel load detection.
+/// Artifact: normal readiness timeout (ms), before bounded retry/recovery.
 pub const DEFAULT_ARTIFACT_PANEL_TIMEOUT: u64 = 200;
-/// Artifact: extra delay (ms) after panel load detection, before capture.
+/// Artifact: minimum stable-detail hold (ms), revalidated throughout.
 pub const DEFAULT_ARTIFACT_EXTRA_DELAY: u64 = 0;
 
 /// Right-side artifact detail panel for partial capture (base 1920×1080).

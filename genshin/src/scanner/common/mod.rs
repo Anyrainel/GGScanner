@@ -1,4 +1,5 @@
 pub mod annotator;
+pub mod artifact_panel;
 pub mod backpack_scanner;
 pub mod capture_frame;
 pub mod character_element;

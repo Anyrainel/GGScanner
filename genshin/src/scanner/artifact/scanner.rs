@@ -1767,9 +1767,10 @@ impl GoodArtifactScanner {
         // Main thread: navigate grid and send captured images to worker
         let scan_config = BackpackScanConfig {
             delay_scroll: self.config.delay_scroll,
-            panel_wait: PanelWaitMode::Fingerprint {
+            panel_wait: PanelWaitMode::Artifact {
                 timeout_ms: self.config.panel_timeout,
                 initial_wait_ms: self.config.initial_wait,
+                stop_on_failure: !self.config.continue_on_failure,
             },
             extra_delay: self.config.extra_delay,
             detail_panel_rect: Some(ARTIFACT_DETAIL_PANEL_RECT),
@@ -1820,7 +1821,7 @@ impl GoodArtifactScanner {
             Ok(())
         };
 
-        bp.scan_grid(total, &scan_config, start_at, |ctrl, event| {
+        let scan_outcome = bp.scan_grid(total, &scan_config, start_at, |ctrl, event| {
             match event {
                 GridEvent::PageStarted { .. } => ScanAction::Continue,
                 GridEvent::PageCompleted { .. } => {
@@ -1894,6 +1895,15 @@ impl GoodArtifactScanner {
                 self.config.panel_timeout + self.config.extra_delay,
             );
         })?;
+
+        if !self.config.continue_on_failure
+            && scan_outcome.termination == backpack_scanner::ScanTermination::CaptureFailure
+        {
+            anyhow::bail!(
+                "无法确认圣遗物详情，已停止扫描 / Artifact detail could not be confirmed; scan stopped (index={})",
+                scan_outcome.scanned_count
+            );
+        }
 
         // Write index map for debug image correlation (output position → folder name)
         if self.config.dump_images {

@@ -29,8 +29,7 @@ pub struct GenshinGameController {
     pub capturer: Rc<dyn Capturer<RgbImage>>,
     pub system_control: SystemControl,
 
-    /// Raw pixel bytes of the previous item's panel region (for change detection).
-    panel_snapshot: Vec<u8>,
+    pub(super) artifact_panel_waiter: super::artifact_panel::ArtifactPanelWaiter,
 
     /// Per-run cancellation token.
     cancel: CancelToken,
@@ -119,7 +118,7 @@ impl GenshinGameController {
             scaler,
             capturer,
             system_control,
-            panel_snapshot: Vec::new(),
+            artifact_panel_waiter: Default::default(),
             cancel: CancelToken::new(),
         })
     }
@@ -549,15 +548,8 @@ impl GenshinGameController {
 
 // Panel-load detection.
 impl GenshinGameController {
-    /// Reset the panel snapshot (e.g. after scrolling to a new page).
-    /// Next `wait_until_panel_loaded` call will accept any content as "new".
-    pub fn reset_panel_fingerprint(&mut self) {
-        self.panel_snapshot.clear();
-    }
-
     /// Ensure the panel region is stable (two captures one frame apart match).
     /// Used after a fixed delay — doesn't require content to differ from previous.
-    /// Updates `panel_fingerprint` with the stable hash.
     pub fn ensure_panel_stable(
         &mut self,
         pool_rect: (f64, f64, f64, f64),
@@ -585,7 +577,6 @@ impl GenshinGameController {
             let raw = im.into_raw();
 
             if panel_frames_similar(&raw, &last_capture) && capture_count > 1 {
-                self.panel_snapshot = raw;
                 let wait_ms = now.elapsed().unwrap().as_millis();
                 log_debug!(
                     "[controller] 面板稳定(等待{}ms, 截图{}次)",
@@ -602,10 +593,6 @@ impl GenshinGameController {
             }
         }
 
-        // Timeout — accept whatever we have
-        if !last_capture.is_empty() {
-            self.panel_snapshot = last_capture;
-        }
         log_debug!(
             "[controller] 面板稳定超时({}ms, 截图{}次)",
             "[controller] panel stable timed out ({}ms, {} caps)",
@@ -613,96 +600,6 @@ impl GenshinGameController {
             capture_count
         );
         Ok(())
-    }
-
-    /// Wait until the detail panel has finished loading a new item.
-    ///
-    /// Compares raw pixel bytes of a panel region against the stored snapshot
-    /// from the previous item. The panel is considered loaded when pixels
-    /// **differ from the previous item** AND are **stable** (two consecutive
-    /// captures are close enough after small capture noise is ignored).
-    ///
-    /// `self.panel_snapshot` starts empty, so the first item is always
-    /// accepted (any capture differs from empty).
-    ///
-    /// Returns `Ok(true)` if the panel loaded (content changed and is stable),
-    /// or `Ok(false)` on timeout (content did not change — likely an empty cell
-    /// was clicked). `Err` is returned only on capture failure.
-    ///
-    /// `pool_rect` is in base 1920x1080 coordinates.
-    /// `timeout_ms` is the maximum wait time in milliseconds.
-    pub fn wait_until_panel_loaded(
-        &mut self,
-        pool_rect: (f64, f64, f64, f64),
-        timeout_ms: u64,
-        initial_wait_ms: u64,
-    ) -> Result<bool> {
-        if self.game_info.is_cloud {
-            utils::sleep(300);
-            return Ok(true);
-        }
-
-        let now = SystemTime::now();
-        let (px, py, pw, ph) = pool_rect;
-        let rect = Rect {
-            left: self.scaler.scale_x(px) as i32,
-            top: self.scaler.scale_y(py) as i32,
-            width: self.scaler.scale_x(pw) as i32,
-            height: self.scaler.scale_y(ph) as i32,
-        };
-
-        // Initial delay: let the game process the click and start rendering.
-        if initial_wait_ms > 0 {
-            utils::sleep(initial_wait_ms as u32);
-        }
-
-        let mut last_capture: Vec<u8> = Vec::new();
-        let mut capture_count: u32 = 0;
-
-        while now.elapsed().unwrap().as_millis() < timeout_ms as u128 {
-            let cap_start = SystemTime::now();
-            let im = self
-                .capturer
-                .capture_relative_to(rect, self.game_info.window.origin())?;
-            capture_count += 1;
-            super::annotator::record_input("panel_change", &im, "panel comparison input", false);
-            let raw = im.into_raw();
-
-            if !panel_frames_similar(&raw, &self.panel_snapshot) {
-                // Content differs from previous item — check stability
-                if panel_frames_similar(&raw, &last_capture) && capture_count > 1 {
-                    // Two consecutive captures match → panel is stable and ready
-                    self.panel_snapshot = raw;
-                    let wait_ms = now.elapsed().unwrap().as_millis();
-                    log_debug!(
-                        "[controller] 面板加载完成(等待{}ms, 截图{}次)",
-                        "[controller] panel loaded (wait {}ms, {} caps)",
-                        wait_ms,
-                        capture_count
-                    );
-                    return Ok(true);
-                }
-                last_capture = raw;
-                // Sleep to span a frame boundary before confirming stability.
-                let cap_ms = cap_start.elapsed().unwrap().as_millis() as u32;
-                if cap_ms < 18 {
-                    utils::sleep(18 - cap_ms);
-                }
-            }
-            // else: still showing the previous item's content, keep waiting
-        }
-
-        // Timeout — store whatever we have and proceed
-        if !last_capture.is_empty() {
-            self.panel_snapshot = last_capture;
-        }
-        log_debug!(
-            "[controller] 面板加载超时({}ms, 截图{}次)",
-            "[controller] panel timed out ({}ms, {} caps)",
-            timeout_ms,
-            capture_count
-        );
-        Ok(false)
     }
 
     /// Capture the color of a single pixel at base 1920x1080 coordinates.

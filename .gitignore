@@ -7,6 +7,7 @@ dumps/
 /*.json
 **/*.png
 !assets/*.png
+!genshin/tests/fixtures/artifact_panel.png
 !experimental/hsr/tests/fixtures/abundance_partial_trace_nodes.png
 !experimental/hsr/src/assets/equipped_path_badges.png
 **tmp**

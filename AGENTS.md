@@ -341,6 +341,13 @@ All fields are hard-match (reject on mismatch): set, slot, rarity, level, main s
 
 Per-page: scan all items via pipelined OCR → match against targets → re-click matched positions → toggle lock → verify pixel. Page-skip optimization: in fast mode, OCR the last item's level first; if > max target level, skip the page entirely (inventory sorted by level descending).
 
+Ordinary artifact scanning, manager page probes, and manager target re-selection
+share `scanner/common/artifact_panel.rs`. It waits for changed, readable details,
+target selection, and cross-frame stability; only a full timeout permits bounded
+retry/reference clicks. OCR receives the accepted screenshot, never an unchecked
+timeout capture. Page-local detail fingerprints also guard manager re-selection;
+invalidate this cache after navigation. Weapon fixed-delay waits are separate.
+
 ### Snapshot (orchestrator.rs)
 
 The internal complete-scan path can build a post-toggle snapshot, but current

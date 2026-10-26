@@ -23,7 +23,7 @@ pub struct GoodArtifactScannerConfig {
     pub initial_wait: u64,
     /// Timeout (ms) for fingerprint-based panel load detection.
     pub panel_timeout: u64,
-    /// Extra delay (ms) after panel load, before capture.
+    /// Minimum stable-detail hold (ms); changes restart the hold.
     pub extra_delay: u64,
     /// If true, keep the 5-star sort filter enabled (for scanning recent artifacts).
     /// If false, dismiss the 5-star sort filter to scan all artifacts.
