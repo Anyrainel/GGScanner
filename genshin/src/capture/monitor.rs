@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use yas::{log_debug, log_error, log_info, log_warn};
 
 use super::packet_capture::{CaptureError, PacketCapture};
+use super::packet_dump::PacketDump;
 use super::player_data::{CaptureExportSettings, PlayerData};
 
 // --- Heuristic thresholds for field-number-agnostic packet matching ---
@@ -56,7 +57,7 @@ pub enum CaptureCommand {
 }
 
 /// State shared between the monitor and UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CaptureState {
     pub listener_ready: bool,
     pub elapsed_secs: u64,
@@ -145,9 +146,7 @@ pub struct CaptureMonitor {
     capture_task: Option<JoinHandle<Result<()>>>,
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    dump_packets: bool,
-    dump_dir: std::path::PathBuf,
-    dump_counter: u32,
+    packet_dump: Option<PacketDump>,
     targets: CaptureExportSettings,
 }
 
@@ -170,20 +169,18 @@ impl CaptureMonitor {
         let sniffer = GameSniffer::new().set_initial_keys(keys);
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
 
-        let dump_dir = crate::cli::exe_dir().join("debug_capture");
-        if dump_packets {
-            std::fs::create_dir_all(&dump_dir).with_context(|| {
-                format!(
-                    "packet dump directory could not be created: {}",
-                    dump_dir.display()
-                )
-            })?;
+        let packet_dump = if dump_packets {
+            let dump = PacketDump::new(&crate::cli::exe_dir().join("debug_capture"))
+                .context("packet dump session could not be created")?;
             log_info!(
                 "数据包转储已开启 → {}",
                 "Packet dump enabled → {}",
-                dump_dir.display(),
+                dump.directory().display(),
             );
-        }
+            Some(dump)
+        } else {
+            None
+        };
 
         Ok(Self {
             player_data,
@@ -193,9 +190,7 @@ impl CaptureMonitor {
             capture_task: None,
             packet_tx,
             packet_rx,
-            dump_packets,
-            dump_dir,
-            dump_counter: 0,
+            packet_dump,
             targets: CaptureExportSettings::default(),
         })
     }
@@ -272,6 +267,10 @@ impl CaptureMonitor {
             self.handle_capture_task_result(task.await);
         }
         let state = self.state.lock().expect("capture state poisoned").clone();
+        if let Some(dump) = &mut self.packet_dump {
+            let result = dump.write_state("end", &state);
+            self.check_dump_write(result);
+        }
         log_info!("抓包结束：{}", "Capture ended: {}", state.diagnostics());
         if let Some(error) = state.error {
             return Err(anyhow!(error));
@@ -319,6 +318,31 @@ impl CaptureMonitor {
     }
 
     fn handle_packet(&mut self, packet: Vec<u8>) {
+        if let Some(dump) = &mut self.packet_dump {
+            let result = dump.write_packet(&packet);
+            self.check_dump_write(result);
+        }
+        self.process_packet(packet);
+        if let Some(dump) = &mut self.packet_dump {
+            let state = self.state.lock().expect("capture state poisoned").clone();
+            let result = dump.write_state("packet", &state);
+            self.check_dump_write(result);
+        }
+    }
+
+    fn check_dump_write(&mut self, result: std::io::Result<()>) {
+        if let Err(error) = result {
+            log_warn!(
+                "抓包调试数据无法继续写入，已停止本次转储。完整错误详情: {}",
+                "Capture debug data could not be written; dumping has stopped for this session. Full error details: {}",
+                error,
+            );
+            // A partially written PCAP record must not be followed by more records.
+            self.packet_dump = None;
+        }
+    }
+
+    fn process_packet(&mut self, packet: Vec<u8>) {
         let decoded = self.sniffer.receive_packet(packet);
         if let Ok(mut state) = self.state.lock() {
             state.packet_count += 1;
@@ -343,20 +367,9 @@ impl CaptureMonitor {
                 .expect("capture state poisoned")
                 .command_count += 1;
             // Dump raw decrypted commands when enabled
-            if self.dump_packets {
-                let path = self.dump_dir.join(format!(
-                    "{:06}_cmd{}.bin",
-                    self.dump_counter, command.command_id
-                ));
-                if let Err(e) = std::fs::write(&path, &command.proto_data) {
-                    log_warn!(
-                        "无法将抓包调试数据写入 {}。请检查磁盘空间和文件夹权限。完整错误详情: {:#}",
-                        "Captured debug data could not be written to {}. Check disk space and folder permissions. Full error details: {:#}",
-                        path.display(),
-                        e,
-                    );
-                }
-                self.dump_counter += 1;
+            if let Some(dump) = &mut self.packet_dump {
+                let result = dump.write_command(command.command_id, &command.proto_data);
+                self.check_dump_write(result);
             }
 
             if let Some(achievement_ids) = try_match_achievements(&command.proto_data) {
@@ -1023,11 +1036,38 @@ mod tests {
             capture_task: None,
             packet_tx,
             packet_rx,
-            dump_packets: false,
-            dump_dir: std::path::PathBuf::new(),
-            dump_counter: 0,
+            packet_dump: None,
             targets: CaptureExportSettings::default(),
         }
+    }
+
+    #[test]
+    fn failed_decode_still_dumps_raw_frame_and_error() {
+        let root = std::env::temp_dir().join(format!("gi-failed-decode-{}", uuid::Uuid::new_v4()));
+        let mut monitor = test_monitor(CaptureState::default());
+        let dump = PacketDump::new(&root).unwrap();
+        let session = dump.directory().to_owned();
+        monitor.packet_dump = Some(dump);
+        let frame = vec![0; 14];
+        monitor.handle_packet(frame.clone());
+
+        let pcap = std::fs::read(session.join("packets.pcap")).unwrap();
+        assert_eq!(&pcap[40..], frame);
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(session.join("diagnostics.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["rawPacket"], 1);
+        assert_eq!(record["commands"], 0);
+        assert_eq!(record["state"]["packet_count"], 1);
+        assert_eq!(record["state"]["command_count"], 0);
+        assert!(record["state"]["last_transport_error"]
+            .as_str()
+            .unwrap()
+            .contains("UDP"));
+        assert!(!session.join("000000_cmd0.bin").exists());
+        drop(monitor);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1040,6 +1080,10 @@ mod tests {
             has_achievements: true,
             ..CaptureState::default()
         });
+        let root = std::env::temp_dir().join(format!("gi-completed-dump-{}", uuid::Uuid::new_v4()));
+        let dump = PacketDump::new(&root).unwrap();
+        let session = dump.directory().to_owned();
+        monitor.packet_dump = Some(dump);
         monitor.player_data.process_achievements(&[80001]);
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
@@ -1062,6 +1106,14 @@ mod tests {
         .unwrap()
         .expect("completed capture must return its export");
         assert_eq!(export.achievements, Some(vec![80001]));
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(session.join("diagnostics.jsonl")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["event"], "end");
+        assert_eq!(record["state"]["complete"], true);
+        assert_eq!(record["state"]["capturing"], false);
+        std::fs::remove_dir_all(root).unwrap();
         assert!(cleanup_done.load(std::sync::atomic::Ordering::Acquire));
         assert!(
             sender.is_closed(),
