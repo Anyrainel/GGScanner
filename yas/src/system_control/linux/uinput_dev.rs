@@ -8,9 +8,14 @@
 //! Two devices are created because no single evdev class covers our needs:
 //!
 //! - **pointer** (`REL_X`/`REL_Y`/wheels + keys): hovering, wheel scrolling
-//!   and keyboard injection. Relative motion goes through the compositor's
-//!   pointer-acceleration and display-scale conversion, so positioning uses
-//!   the corner-slam / learned-factor / readback scheme in `linux_control`.
+//!   and keyboard injection. It is relative because hover and the wheel need
+//!   real pointer semantics, not because uinput cannot do absolute motion — an
+//!   absolute *pointer* (the usb-tablet shape) would have its axis values
+//!   mapped onto the screen by the compositor's device-to-output assignment and
+//!   output scale, which a client cannot set. Relative motion goes through the
+//!   compositor's pointer-acceleration and display-scale conversion, so
+//!   positioning uses the corner-slam / learned-factor / readback scheme in
+//!   `linux_control`.
 //! - **touch** (`ABS_X`/`ABS_Y` + `BTN_TOUCH`, `INPUT_PROP_DIRECT`): clicks
 //!   land at *exact* absolute coordinates — no slam, no acceleration, no
 //!   scale conversion. A touchscreen has no hover, so the relative pointer

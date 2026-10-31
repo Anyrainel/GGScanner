@@ -79,13 +79,18 @@ injection; scope it to the intended user. The scanner reports unavailable
 input before navigation begins.
 
 The virtual pointer uses relative motion with position readback and speed
-calibration. The readback is polled until it settles, so a position that lags the
-injected report is not mistaken for a frozen pointer, and a landing inside the
-self-check window (a few pixels) is accepted. A click whose position cannot be
-verified fails instead of clicking elsewhere; a hover only degrades to a warning,
-because the click that follows uses the absolute touchscreen. Use a flat
-acceleration profile. The optional virtual touchscreen handles absolute clicks;
-`GOODSCANNER_TOUCH_CLICK=0` selects the verified pointer path.
+calibration. It is relative by design, not by limitation: uinput does support
+absolute axes (the virtual touchscreen uses them), but hover and the wheel need
+real pointer semantics, and an absolute pointer's axis values are mapped onto the
+screen by the compositor's device-to-output assignment and output scale — a
+mapping the client cannot set and that fails silently when wrong. The readback is
+polled until it settles, so a position that lags the injected report is not
+mistaken for a frozen pointer, and a landing inside the self-check window (a few
+pixels) is accepted. A click whose position cannot be verified fails instead of
+clicking elsewhere; a hover only degrades to a warning, because the click that
+follows uses the absolute touchscreen. Use a flat acceleration profile. The
+optional virtual touchscreen handles absolute clicks; `GOODSCANNER_TOUCH_CLICK=0`
+selects the verified pointer path.
 Multi-output Wayland touchscreen mapping and fractional scaling vary by
 compositor and remain unvalidated. Use a single output for initial testing.
 Do not change monitor arrangement or move the game during a run. Star Rail

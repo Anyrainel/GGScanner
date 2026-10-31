@@ -216,10 +216,15 @@ struct PointerState {
 
 /// Move the pointer to `(x, y)` in root coordinates.
 ///
-/// uinput can only inject *relative* motion, so absolute positioning needs a
-/// known origin: the pointer is slammed into the top-left corner once and every
-/// later move is a relative hop from the last verified position. Three
-/// environment facts shape this:
+/// The virtual *pointer* is built from `REL_X`/`REL_Y` — not because uinput
+/// cannot do absolute motion (the touch device in `super::uinput_dev` is built
+/// from `ABS_X`/`ABS_Y`), but because hover and the wheel need real pointer
+/// semantics, and an absolute pointer's axis values are mapped onto the screen
+/// by the compositor's device-to-output assignment plus output scale: a mapping
+/// the client cannot set and that fails silently when wrong. So absolute
+/// positioning here needs a known origin: the pointer is slammed into the
+/// top-left corner once and every later move is a relative hop from the last
+/// verified position. Three environment facts shape this:
 ///
 /// 1. The slam must be separated from the following delta by a frame, otherwise
 ///    the compositor coalesces them and the delta is lost (pointer stays at 0,0).
