@@ -22,6 +22,7 @@
 use enigo::Key;
 use evdev::KeyCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use x11rb::protocol::xproto::{
     BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
     MOTION_NOTIFY_EVENT,
@@ -157,6 +158,16 @@ const POINTER_WARN_PX: i32 = 8;
 const POINTER_SLAM_SETTLE_MS: u32 = 40;
 /// Settle time after an injected move before reading the position back.
 const POINTER_SETTLE_MS: u32 = 12;
+/// Polling step while waiting for the readback to catch up with injected motion.
+const POINTER_READBACK_POLL_MS: u32 = 8;
+/// Longest wait for the X11 pointer readback to follow one injected move.
+///
+/// The X server reports the pointer position a frame or two behind the
+/// injected report, and a window that grabs the pointer can hold it longer. A
+/// single fixed delay therefore either samples mid-flight or mistakes the lag
+/// for a frozen readback — the latter used to abort the move, and with it the
+/// whole job.
+const POINTER_READBACK_TIMEOUT_MS: u32 = 80;
 /// Attempts allowed for one move. The first one can be clamped at the screen
 /// edge while the speed multiplier is still unknown, so a couple of refinements
 /// are expected.
@@ -205,10 +216,15 @@ struct PointerState {
 
 /// Move the pointer to `(x, y)` in root coordinates.
 ///
-/// uinput can only inject *relative* motion, so absolute positioning needs a
-/// known origin: the pointer is slammed into the top-left corner once and every
-/// later move is a relative hop from the last verified position. Three
-/// environment facts shape this:
+/// The virtual *pointer* is built from `REL_X`/`REL_Y` — not because uinput
+/// cannot do absolute motion (the touch device in `super::uinput_dev` is built
+/// from `ABS_X`/`ABS_Y`), but because hover and the wheel need real pointer
+/// semantics, and an absolute pointer's axis values are mapped onto the screen
+/// by the compositor's device-to-output assignment plus output scale: a mapping
+/// the client cannot set and that fails silently when wrong. So absolute
+/// positioning here needs a known origin: the pointer is slammed into the
+/// top-left corner once and every later move is a relative hop from the last
+/// verified position. Three environment facts shape this:
 ///
 /// 1. The slam must be separated from the following delta by a frame, otherwise
 ///    the compositor coalesces them and the delta is lost (pointer stays at 0,0).
@@ -223,11 +239,18 @@ struct PointerState {
 /// motion. A readback that does not move for a non-trivial delta is stale (the
 /// game can hold the pointer); the origin is then dropped so the next move
 /// re-slams, and the situation is reported once.
+///
+/// `strict` decides what an unverified landing means. A move a click depends on
+/// fails, so a click never lands somewhere else silently; a hover only gives up
+/// quietly, because the click that follows goes through the absolute
+/// touchscreen when one exists, and a few pixels of hover error never change
+/// which widget receives the wheel or the click.
 fn move_pointer_absolute(
     devices: &mut UinputDevices,
     x: i32,
     y: i32,
     state: &mut PointerState,
+    strict: bool,
 ) -> anyhow::Result<()> {
     let mut last_pos: Option<(i32, i32)> = None;
     let mut stale_readback = false;
@@ -241,6 +264,11 @@ fn move_pointer_absolute(
             .clamp(POINTER_SCALE_MIN, POINTER_SCALE_MAX);
         let requested_x = ((x - state.known.unwrap_or((0, 0)).0) as f32 / factor).round() as i32;
         let requested_y = ((y - state.known.unwrap_or((0, 0)).1) as f32 / factor).round() as i32;
+        // Distance still to cover, measured before the speed factor is applied:
+        // a large residual that produced no motion is a stale readback, however
+        // small the divided delta turned out to be.
+        let residual_x = (x - state.known.unwrap_or((0, 0)).0).abs();
+        let residual_y = (y - state.known.unwrap_or((0, 0)).1).abs();
         let origin = match state.known {
             // Relative hop from the position verified by the previous move: no
             // slam, so the game keeps its hover and the move costs one report.
@@ -260,7 +288,7 @@ fn move_pointer_absolute(
         };
         utils::sleep(POINTER_SETTLE_MS);
 
-        let Some(pos) = read_pointer() else {
+        let Some(pos) = read_pointer_settled(origin) else {
             break;
         };
         last_pos = Some(pos);
@@ -270,8 +298,8 @@ fn move_pointer_absolute(
             break;
         }
         if pos == origin
-            && (requested_x.abs() >= POINTER_MIN_STALE_DELTA_PX
-                || requested_y.abs() >= POINTER_MIN_STALE_DELTA_PX)
+            && (residual_x >= POINTER_MIN_STALE_DELTA_PX
+                || residual_y >= POINTER_MIN_STALE_DELTA_PX)
         {
             // A non-trivial delta produced no reported motion: the readback is
             // stale, so stop trusting it and re-slam on the next move.
@@ -293,10 +321,61 @@ fn move_pointer_absolute(
     if stale_readback {
         report_frozen_readback();
     }
-    anyhow::ensure!(last_pos.is_some_and(|p|
-        (p.0 - x).abs().max((p.1 - y).abs()) <= POINTER_TOLERANCE_PX),
-        "uinput pointer positioning could not be verified; requested ({x}, {y}), observed {last_pos:?}");
-    Ok(())
+    pointer_move_outcome(x, y, last_pos, strict)
+}
+
+/// Decide whether a move may proceed after its attempts are spent.
+///
+/// Anything inside [`POINTER_WARN_PX`] is a usable landing for both a hover and
+/// a click: the exact-positioning tolerance only decides when another attempt is
+/// worth it, and [`report_pointer_self_check`] has already reported the error.
+/// A hard failure here used to abort whole jobs over a handful of pixels, which
+/// is why it is limited to genuinely unplaceable moves.
+fn pointer_move_outcome(
+    x: i32,
+    y: i32,
+    last_pos: Option<(i32, i32)>,
+    strict: bool,
+) -> anyhow::Result<()> {
+    match last_pos.map(|p| (p.0 - x).abs().max((p.1 - y).abs())) {
+        Some(off) if off <= POINTER_WARN_PX => Ok(()),
+        // A hover never needs to be exact: the click that follows goes through
+        // the absolute touchscreen, and a few pixels never change which widget
+        // receives the wheel.
+        _ if !strict => Ok(()),
+        None => anyhow::bail!(
+            "uinput pointer positioning could not be verified: the X11 pointer position is unreadable, so a click at ({x}, {y}) cannot be placed \
+             / 无法校验 uinput 指针定位：读不到 X11 指针位置，点击 ({x}, {y}) 无法定位"
+        ),
+        Some(off) => anyhow::bail!(
+            "uinput pointer positioning could not be verified; requested ({x}, {y}), observed {last_pos:?} ({off}px off) \
+             / 无法校验 uinput 指针定位：目标 ({x}, {y})，实际 {last_pos:?}，偏差 {off}px"
+        ),
+    }
+}
+
+/// Read the pointer position once the readback has caught up with the motion.
+///
+/// The X server can report the pointer position a frame or two behind the
+/// injected report, and a window that grabs the pointer can hold it longer, so a
+/// single fixed delay either samples mid-flight or mistakes the lag for a frozen
+/// readback. Poll until two consecutive samples agree and the position has left
+/// `origin`, or until the timeout expires; the caller then decides whether a
+/// motionless position means "stale readback".
+fn read_pointer_settled(origin: (i32, i32)) -> Option<(i32, i32)> {
+    let deadline = Instant::now() + Duration::from_millis(u64::from(POINTER_READBACK_TIMEOUT_MS));
+    let mut previous = read_pointer()?;
+    loop {
+        utils::sleep(POINTER_READBACK_POLL_MS);
+        let current = read_pointer()?;
+        if current == previous && current != origin {
+            return Some(current);
+        }
+        if Instant::now() >= deadline {
+            return Some(current);
+        }
+        previous = current;
+    }
 }
 
 /// Read the pointer position, or `None` when X11 is unavailable.
@@ -470,13 +549,27 @@ impl LinuxControl {
         )
     }
 
+    /// Move the pointer without clicking.
+    ///
+    /// Hover only: a landing that could not be verified to the exact tolerance is
+    /// accepted (the self-check still reports it), because callers use this to
+    /// put the pointer over a widget before a click that goes through the
+    /// absolute touchscreen, and to aim the wheel. Failing here would abort a
+    /// whole scan over a few pixels of hover error.
     pub fn mouse_move_to(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
+        self.move_pointer_to(x, y, false)
+    }
+
+    /// Place the pointer at `(x, y)`, optionally requiring a verified landing.
+    fn move_pointer_to(&mut self, x: i32, y: i32, strict: bool) -> anyhow::Result<()> {
         // The positioning state is moved out so the backend borrow of `self`
         // does not overlap the field borrow.
         let mut pointer = std::mem::take(&mut self.pointer);
         let result = self.with_backend(|backend| match backend {
             InputBackend::XTest => utils::fake_input(MOTION_NOTIFY_EVENT, 0, x as i16, y as i16),
-            InputBackend::Uinput(devices) => move_pointer_absolute(devices, x, y, &mut pointer),
+            InputBackend::Uinput(devices) => {
+                move_pointer_absolute(devices, x, y, &mut pointer, strict)
+            },
         });
         self.pointer = pointer;
         result
@@ -564,7 +657,9 @@ impl LinuxControl {
                     utils::sleep(30);
                     Ok(())
                 } else {
-                    move_pointer_absolute(devices, x, y, &mut pointer)?;
+                    // The click lands wherever the pointer is, so an unverified
+                    // position must fail instead of clicking elsewhere.
+                    move_pointer_absolute(devices, x, y, &mut pointer, true)?;
                     utils::sleep(10);
                     devices.pointer_click()
                 }
@@ -642,9 +737,51 @@ impl LinuxControl {
 
 impl crate::system_control::gesture::DragDriver for LinuxControl {
     fn move_to(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
-        self.mouse_move_to(x, y)
+        // A drag presses at the pointer position, so this is a click position in
+        // all but name: an unverified landing must fail.
+        self.move_pointer_to(x, y, true)
     }
     fn left_button(&mut self, pressed: bool) -> anyhow::Result<()> {
         self.mouse_button(pressed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hover that lands a few pixels off is a success, not a job-killing
+    /// failure: this is the exact case reported from a live Wayland session
+    /// (asked for (300, 500), landed at (300, 507) and aborted the whole manage
+    /// job).
+    #[test]
+    fn small_residual_never_fails_a_move() {
+        assert!(pointer_move_outcome(300, 500, Some((300, 507)), false).is_ok());
+        assert!(pointer_move_outcome(300, 500, Some((300, 507)), true).is_ok());
+        assert!(pointer_move_outcome(300, 500, Some((300, 500)), true).is_ok());
+        // The documented self-check window itself is still accepted.
+        assert!(pointer_move_outcome(300, 500, Some((308, 500)), true).is_ok());
+    }
+
+    /// A hover degrades gracefully when the readback is useless; a click must
+    /// fail instead of clicking somewhere else.
+    #[test]
+    fn unverified_landing_only_fails_click_positions() {
+        assert!(pointer_move_outcome(300, 500, None, false).is_ok());
+        assert!(pointer_move_outcome(300, 500, None, true).is_err());
+        assert!(pointer_move_outcome(300, 500, Some((380, 500)), false).is_ok());
+        assert!(pointer_move_outcome(300, 500, Some((380, 500)), true).is_err());
+    }
+
+    /// The speed multiplier is only sampled from moves large enough to average
+    /// out compositor rounding.
+    #[test]
+    fn pointer_scale_needs_a_large_same_direction_sample() {
+        assert_eq!(measure_pointer_scale(300, 500, 375, 625), Some(1.25));
+        assert_eq!(measure_pointer_scale(500, 300, 625, 375), Some(1.25));
+        // Too small to sample.
+        assert_eq!(measure_pointer_scale(10, 10, 12, 12), None);
+        // Motion in the opposite direction means the readback is not ours.
+        assert_eq!(measure_pointer_scale(300, 500, -375, -625), None);
     }
 }
