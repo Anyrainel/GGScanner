@@ -6,6 +6,10 @@ paths automatically download keys at runtime. A Cargo dependency update does
 not update these application-owned files, and the Genshin decoder is patched
 to a local vendored copy.
 
+The separate [capture upstream review](CAPTURE_UPSTREAM_AUDIT.md) covers RSA,
+decryption, token exchange and protocol-source drift. Its read-only
+`scripts/check_capture_upstreams.py` complements this dispatch-table check.
+
 Run `uv run --no-project python scripts/check_capture_keys.py` to compare the
 working tree with StarDB Exporter's current public GI and HSR key tables. The
 checker resolves `master` once and fetches both files at that immutable commit.

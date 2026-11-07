@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "reviewed_date": "2026-11-07",
+  "sources": [
+    {
+      "repository": "konkers/auto-artifactarium",
+      "reviewed_revision": "7dafbf0af0bfece23e46382dd3f991d39a5436ac",
+      "files": {
+        "Cargo.toml": "e34b8ee73572d81c4b6ebaae23a66f813e9522d1",
+        "src/connection.rs": "71f4282d1489533e2480fb65dd5c3a8f3c9811d7",
+        "src/crypto.rs": "5b04def0fada32db4a8f1d7f1f5591591d05adbd",
+        "src/cs_rand.rs": "bd750803cc8c368d213938333cda1f8912d7e997",
+        "src/kcp.rs": "41b7a9fceb9f061dfc6f8bd39a6dcdc5c18da35f",
+        "src/lib.rs": "a9f51bd1ab7115231ace115f271277530aafc83e",
+        "src/unk_util.rs": "c97f1d55e12eb9636c7066b072d043642b725eb3",
+        "keys/private_key_4.pem": "314f0f837efc8ab8fa33bb4d9330c82c5f215037",
+        "keys/private_key_5.pem": "f1636adbe83211b1947151edc3df04eed0f24098",
+        "protos/protos.proto": "619866a50b93d2b1b50ee09e87581213b85ee808"
+      }
+    },
+    {
+      "repository": "IceDynamix/reliquary",
+      "reviewed_revision": "0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38",
+      "files": {
+        "Cargo.toml": "9dd7aa8e68dd363ec27a393b7f2131df4eb8e4ea",
+        "src/network/command/mod.rs": "5c3edd446b3ddfb871f905f2c48cd82d152ceba6",
+        "src/network/command/proto/Avatar.rs": "7f12699048da5423ba3e6240d52dc9cd43639e87",
+        "src/network/command/proto/AvatarPathData.rs": "9bfb3d15cc2e0e96945ae26ea05ae2cb87ab56dd",
+        "src/network/command/proto/AvatarPathSkillTree.rs": "dfc2c1c0c0ef5c1081c518140ac298f835bf2c6a",
+        "src/network/command/proto/EquipRelic.rs": "df81e63b88bed02bed3eb5c71d125758c0360909",
+        "src/network/command/proto/Equipment.rs": "9cfa4ec10940975bb05551c4d647e4764b175f56",
+        "src/network/command/proto/GetAvatarDataScRsp.rs": "5f39c31295def387c657e5db63dde6f6daefa783",
+        "src/network/command/proto/GetBagScRsp.rs": "069cedfd8c16f005fdb13c8dace99bcd12cc6377",
+        "src/network/command/proto/GetQuestDataScRsp.rs": "340b9d73b9004df610c9236f273c88fbfbafcbe0",
+        "src/network/command/proto/PlayerGetTokenScRsp.rs": "17e9a76b085281ecec7003bd525f276fee19bd6f",
+        "src/network/command/proto/Quest.rs": "4211e5ac2e99046d14c797598f834ab97ed19665",
+        "src/network/command/proto/Relic.rs": "b80ebaef18930c3540edb75f2a1f90ae2e61eed7",
+        "src/network/command/proto/RelicAffix.rs": "9ac64d6ff29d1622d65bbaaffd523fed70fb6e42",
+        "src/network/connection.rs": "217aec772bc5c105db43dbce63216565e285f83f",
+        "src/network/crypto.rs": "2ab9286b2ccb838863dd242f490612e8db5f6eb3",
+        "src/network/kcp.rs": "5f26457e705939b068f310f40b2486c2a77c1f27",
+        "src/network/mod.rs": "0e2f8daeba82e5ec2b4e09eaf4ac25041ad5f465"
+      }
+    }
+  ],
+  "local_files": {
+    "vendor/auto-artifactarium/Cargo.toml": "359c6d280bc3f00a39d0f61fef70011ff65813f4dbfa5e6d82e10613f00b5aa7",
+    "vendor/auto-artifactarium/protos/protos.proto": "0f0744decd88ad6ff6219e11f351acbe777cd4584bc7423460b2c1af633575fa",
+    "vendor/auto-artifactarium/keys/private_key_4.pem": "c43fafade9dbc63440339fab24fa19d5ae78bc69e60d66ee956d951d6ff6392f",
+    "vendor/auto-artifactarium/keys/private_key_5.pem": "6a3fbd53387f9d13230f8558e40df18ad3a8fc11fc23da83a202eedc3bd70ce3",
+    "vendor/auto-artifactarium/src/connection.rs": "5eeb45e69740359e8bc19096b578e805a94a045a63d4628e7e809245175a40f8",
+    "vendor/auto-artifactarium/src/crypto.rs": "ce1cd99455909cad1817f3dd79f8d9e0c4cc636488df625e8649c0adfcc09fad",
+    "vendor/auto-artifactarium/src/cs_rand.rs": "df9fba860112fa059c0b1219518faffc28b5a464eeb1dfbde03aaf1665e310d6",
+    "vendor/auto-artifactarium/src/kcp.rs": "cb76350fc16f9f5ca2dfa0e0dc0b6d67b35ea2ad1e3aa67a9f1ebe4f0b80b013",
+    "vendor/auto-artifactarium/src/lib.rs": "48f95bb5b183e9a032e9fd93c84618c4a51e579af921e0938121a1c188dba274",
+    "vendor/auto-artifactarium/src/unk_util.rs": "7ee2e69a385ef8212e69146329e16906860874036af7c47055434696f85d8019",
+    "experimental/hsr/Cargo.toml": "d3456acee5042afbd5a936ae5a37a27a98f1f9c79ae579a52e701eb641e6232c",
+    "experimental/hsr/src/packet_capture/protocol.rs": "51247ed100bec8959cebe1cab0e0cf1c2793595bb6fdab44bb53d6329d258396",
+    "experimental/hsr/src/network/command.rs": "88d70df2d5b7c5965fca6e914aa4cc945d21f13a643f9c06bae971aea41171b3",
+    "experimental/hsr/src/network/connection.rs": "6c714a139eda9a3a16bc341b7f44ed70c70204630d3bead60d560acd8ba5b56e",
+    "experimental/hsr/src/network/crypto.rs": "6a6f7bc6fe90bb234280d806021643321fb2d156cdecd1ecfc78e161e6d65ce8",
+    "experimental/hsr/src/network/kcp.rs": "4ff91d135a15daccca67ceeb77a9397083c1dcda5eeaec891289b8c8f771c39d",
+    "experimental/hsr/src/network/mod.rs": "923ceb63c583dcb039f2a296f3b692c404af838fec3ab517a49132b88d915a37",
+    "experimental/hsr/src/packet_capture/proto/Avatar.rs": "0e48cb8726e7e9bc5efa9ac665e5cd473af7c0a9f897db9963ad1301f84b2528",
+    "experimental/hsr/src/packet_capture/proto/AvatarPathData.rs": "50629494c144039ef20cbd43b34381b013c29915e5ceddbf7e4c55a2a987f58e",
+    "experimental/hsr/src/packet_capture/proto/AvatarPathSkillTree.rs": "654c87d4a9fd0ce336d7fda698f3fbcafa5481e7d2720f002aa9cc028894a0c7",
+    "experimental/hsr/src/packet_capture/proto/Equipment.rs": "bb7a336c2745d12de2d011298e68ebdc35e4c9d6647f6ee2d272576dad47f023",
+    "experimental/hsr/src/packet_capture/proto/EquipRelic.rs": "8800384bd06df4dd0a7dd66405628e690832dceb956c3f691dadaad6e5d4f854",
+    "experimental/hsr/src/packet_capture/proto/mod.rs": "2827f81f3a62bdbbc11f588185919dd811c0c73f7cd1d4cd248d19bf2eca6036",
+    "experimental/hsr/src/packet_capture/proto/Relic.rs": "35c8e731606f1c609fa7d8a356fa9f5b1a4cad3efe81e12d195892cf0b667d0e",
+    "experimental/hsr/src/packet_capture/proto/RelicAffix.rs": "51781661a10cd1e3267e5d3a2a5613f9e2feeffc799ae3fea70f19cac5984ebf"
+  }
+}
