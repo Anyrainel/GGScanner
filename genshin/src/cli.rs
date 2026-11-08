@@ -954,6 +954,8 @@ pub struct GoodUserConfig {
     pub achievement_max_count: usize,
     #[serde(default = "default_server_port")]
     pub server_port: u16,
+    #[serde(default)]
+    pub continuous_capture: bool,
     #[serde(default = "default_true", alias = "manage_recent_artifacts")]
     pub filter_involved_sets: bool,
 
@@ -1039,6 +1041,7 @@ impl Default for GoodUserConfig {
             artifact_max_count: 0,
             achievement_max_count: 0,
             server_port: default_server_port(),
+            continuous_capture: false,
             filter_involved_sets: true,
             capture_include_characters: true,
             capture_include_weapons: true,
@@ -1943,6 +1946,36 @@ pub fn run_server_core_observed(
     status_fn: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     native_job: Option<std::sync::Arc<std::sync::Mutex<crate::manager::models::JobState>>>,
 ) -> Result<()> {
+    run_server_core_observed_continuous(
+        user_config,
+        server_port,
+        ocr,
+        enabled,
+        shutdown,
+        stop_on_all_matched,
+        filter_involved_sets,
+        dump_images,
+        dump_job_data,
+        status_fn,
+        native_job,
+        None,
+    )
+}
+
+pub fn run_server_core_observed_continuous(
+    user_config: &GoodUserConfig,
+    server_port: u16,
+    ocr: &OcrEngineArgs,
+    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_on_all_matched: bool,
+    filter_involved_sets: bool,
+    dump_images: bool,
+    dump_job_data: bool,
+    status_fn: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    native_job: Option<std::sync::Arc<std::sync::Mutex<crate::manager::models::JobState>>>,
+    continuous: Option<crate::continuous::ContinuousCapture>,
+) -> Result<()> {
     init_rayon_pool();
     crate::scanner::common::annotator::init(dump_images);
     crate::scanner::common::pixel_profile::set_hdr_mode(user_config.hdr_mode);
@@ -2024,7 +2057,7 @@ pub fn run_server_core_observed(
         }))
     };
 
-    crate::server::run_server_observed(
+    crate::server::run_server_observed_continuous(
         server_port,
         init_executor,
         enabled,
@@ -2032,6 +2065,7 @@ pub fn run_server_core_observed(
         dump_job_data,
         status_fn,
         native_job,
+        continuous,
     )
 }
 

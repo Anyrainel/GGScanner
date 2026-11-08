@@ -27,7 +27,9 @@ pub fn parse_connection_packet(
             },
             404 => {
                 warn!("disconnected packet");
-                Ok(ConnectionPacket::Disconnected)
+                // The same connection ID as establishment occupies bytes 4..8.
+                let conv_id = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                Ok(ConnectionPacket::Disconnected { conv_id })
             },
             _ => {
                 let conv_id = u32::from_be_bytes(payload[4..8].try_into().unwrap());

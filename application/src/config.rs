@@ -166,6 +166,8 @@ pub struct StarRailSettings {
     #[serde(default = "default_manager_port")]
     pub manager_port: u16,
     #[serde(default)]
+    pub continuous_capture: bool,
+    #[serde(default)]
     pub manager_journal_path: String,
     #[serde(default = "default_true")]
     pub capture_include_achievements: bool,
@@ -203,6 +205,7 @@ impl Default for StarRailSettings {
             scan_only_keep_latest_export: true,
             manager_instructions_path: String::new(),
             manager_port: default_manager_port(),
+            continuous_capture: false,
             manager_journal_path: String::new(),
             capture_include_achievements: true,
             capture_include_characters: true,

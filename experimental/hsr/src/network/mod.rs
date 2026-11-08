@@ -20,7 +20,10 @@ pub mod command;
 
 mod connection;
 mod crypto;
+mod identity;
 mod kcp;
+
+pub(crate) use identity::{AccountIdentity, IdentityUpdate};
 
 const PORTS: [u16; 2] = [23301, 23302];
 
@@ -39,8 +42,14 @@ pub enum GamePacket {
     Connection(ConnectionPacket),
     Commands {
         conv_id: u32,
-        result: Result<GameCommand, GameCommandError>,
+        direction: PacketDirection,
+        result: Result<DecodedCommand, GameCommandError>,
     },
+}
+
+pub(crate) struct DecodedCommand {
+    pub command: GameCommand,
+    pub identity_update: Option<IdentityUpdate>,
 }
 
 #[cfg(test)]
@@ -48,8 +57,19 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn frame(conv: u32, sequence: u32, body: &[u8], key: &[u8]) -> Vec<u8> {
+        command_frame(conv, sequence, 65500, body, key, PacketDirection::Received)
+    }
+
+    pub(crate) fn command_frame(
+        conv: u32,
+        sequence: u32,
+        id: u16,
+        body: &[u8],
+        key: &[u8],
+        direction: PacketDirection,
+    ) -> Vec<u8> {
         let mut command = 0x9D74C714u32.to_be_bytes().to_vec();
-        command.extend_from_slice(&65500u16.to_be_bytes()); // intentionally unrelated command ID
+        command.extend_from_slice(&id.to_be_bytes());
         command.extend_from_slice(&0u16.to_be_bytes());
         command.extend_from_slice(&(body.len() as u32).to_be_bytes());
         command.extend_from_slice(body);
@@ -72,12 +92,21 @@ pub(crate) mod tests {
         ip[8] = 64;
         ip[9] = 17;
         packet.extend(ip);
-        packet.extend_from_slice(&23301u16.to_be_bytes());
-        packet.extend_from_slice(&50000u16.to_be_bytes());
+        let ports: [u16; 2] = if direction == PacketDirection::Received {
+            [23301, 50000]
+        } else {
+            [50000, 23301]
+        };
+        packet.extend_from_slice(&ports[0].to_be_bytes());
+        packet.extend_from_slice(&ports[1].to_be_bytes());
         packet.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
         packet.extend_from_slice(&[0, 0]);
         packet.extend(payload);
         packet
+    }
+
+    pub(crate) fn session_key(seed: u64) -> Vec<u8> {
+        new_key_from_seed(seed)
     }
 
     pub(crate) fn token(seed: u64, tag: u32) -> Vec<u8> {
@@ -99,7 +128,7 @@ pub(crate) mod tests {
                 GamePacket::Commands {
                     result: Ok(command),
                     ..
-                } => Some(command.proto_data),
+                } => Some(command.command.proto_data),
                 _ => None,
             })
             .collect()
@@ -166,7 +195,7 @@ pub(crate) mod tests {
 /// Packet for connection management
 pub enum ConnectionPacket {
     HandshakeRequested,
-    Disconnected,
+    Disconnected { conv_id: u32 },
     HandshakeEstablished { conv_id: u32 },
     SegmentData(PacketDirection, Vec<u8>),
 }
@@ -184,13 +213,15 @@ struct ConversationSniffer {
     sent_kcp: KcpSniffer,
     recv_kcp: KcpSniffer,
     key: Option<Vec<u8>>,
+    dispatch_key_id: Option<u32>,
+    account: Option<AccountIdentity>,
     // Commands sent by client that couldn't be decrypted due to a version mismatch.
     // We buffer the raw command bytes and retry after we learn the new session key
     // from PlayerGetTokenScRsp.
     pending_sent: VecDeque<Vec<u8>>,
     // Commands that were successfully retried after setting the new key. These are
     // emitted with the next receive_packet() response.
-    deferred_commands: Vec<GameCommand>,
+    deferred_commands: Vec<DecodedCommand>,
 }
 
 impl ConversationSniffer {
@@ -201,6 +232,8 @@ impl ConversationSniffer {
             sent_kcp: KcpSniffer::new(conv_id),
             recv_kcp: KcpSniffer::new(conv_id),
             key: None,
+            dispatch_key_id: None,
+            account: None,
             pending_sent: VecDeque::new(),
             deferred_commands: Vec::new(),
         }
@@ -211,7 +244,7 @@ impl ConversationSniffer {
         direction: PacketDirection,
         kcp_seg: &[u8],
         initial_keys: &HashMap<u32, Vec<u8>>,
-    ) -> Result<Vec<Result<GameCommand, GameCommandError>>, KcpError> {
+    ) -> Result<Vec<Result<DecodedCommand, GameCommandError>>, KcpError> {
         let kcp = match direction {
             PacketDirection::Sent => &mut self.sent_kcp,
             PacketDirection::Received => &mut self.recv_kcp,
@@ -231,7 +264,7 @@ impl ConversationSniffer {
         direction: PacketDirection,
         mut data: Vec<u8>,
         initial_keys: &HashMap<u32, Vec<u8>>,
-    ) -> Result<GameCommand, GameCommandError> {
+    ) -> Result<DecodedCommand, GameCommandError> {
         // Keep original bytes in case we need to buffer on version mismatch (client-sent only)
         let original_data = if matches!(direction, PacketDirection::Sent) {
             Some(data.clone())
@@ -249,6 +282,7 @@ impl ConversationSniffer {
             Some(key) => key,
             None => match lookup_initial_key(initial_keys, get_game_version(&data)) {
                 Some(key) => {
+                    self.dispatch_key_id = Some(get_game_version(&data));
                     self.key = Some(key);
                     self.key.as_ref().unwrap()
                 },
@@ -286,6 +320,39 @@ impl ConversationSniffer {
 
         info!("received");
 
+        let mut identity_update = None;
+        if direction == PacketDirection::Received {
+            if !self.session_key {
+                if let Some(uid) = identity::token_uid(
+                    self.dispatch_key_id,
+                    command.command_id,
+                    &command.proto_data,
+                ) {
+                    let account = AccountIdentity {
+                        uid,
+                        nickname: None,
+                    };
+                    self.account = Some(account.clone());
+                    identity_update = Some(IdentityUpdate {
+                        account,
+                        new_login: true,
+                    });
+                }
+            } else if let Some(account) = &mut self.account {
+                if let Some(nickname) = identity::login_nickname(
+                    self.dispatch_key_id,
+                    command.command_id,
+                    &command.proto_data,
+                ) {
+                    account.nickname = Some(nickname);
+                    identity_update = Some(IdentityUpdate {
+                        account: account.clone(),
+                        new_login: false,
+                    });
+                }
+            }
+        }
+
         if let Some(seed) = self
             .key
             .as_ref()
@@ -320,10 +387,13 @@ impl ConversationSniffer {
             }
         }
 
-        Ok(command)
+        Ok(DecodedCommand {
+            command,
+            identity_update,
+        })
     }
 
-    fn take_deferred_commands(&mut self) -> Vec<GameCommand> {
+    fn take_deferred_commands(&mut self) -> Vec<DecodedCommand> {
         std::mem::take(&mut self.deferred_commands)
     }
 }
@@ -365,12 +435,18 @@ impl GameSniffer {
 
             ConnectionPacket::HandshakeEstablished { conv_id } => {
                 info!(conv_id, "handshake established, creating new conversation");
+                // pktmon can deliver the same handshake from several capture points.
+                // A duplicate must not discard a key/identity already learned.
                 self.conversations
-                    .insert(conv_id, ConversationSniffer::new(conv_id));
+                    .entry(conv_id)
+                    .or_insert_with(|| ConversationSniffer::new(conv_id));
                 Ok(vec![GamePacket::Connection(packet)])
             },
 
-            ConnectionPacket::Disconnected => Ok(vec![GamePacket::Connection(packet)]),
+            ConnectionPacket::Disconnected { conv_id } => {
+                self.conversations.remove(&conv_id);
+                Ok(vec![GamePacket::Connection(packet)])
+            },
 
             ConnectionPacket::SegmentData(direction, kcp_seg) => {
                 let conv_id = kcp::validate_kcp_segment(&kcp_seg)?;
@@ -384,13 +460,18 @@ impl GameSniffer {
                 let mut commands: Vec<GamePacket> = conversation
                     .receive_kcp_segment(direction, &kcp_seg, &self.initial_keys)?
                     .into_iter()
-                    .map(|result| GamePacket::Commands { conv_id, result })
+                    .map(|result| GamePacket::Commands {
+                        conv_id,
+                        direction,
+                        result,
+                    })
                     .collect();
 
                 // Emit any deferred commands from key update
                 for cmd in conversation.take_deferred_commands() {
                     commands.push(GamePacket::Commands {
                         conv_id,
+                        direction: PacketDirection::Sent,
                         result: Ok(cmd),
                     });
                 }

@@ -10,3 +10,5 @@ mod runtime_download;
 pub mod scanner;
 pub mod server;
 pub mod updater;
+
+pub mod continuous;

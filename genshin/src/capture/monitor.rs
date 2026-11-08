@@ -148,6 +148,7 @@ pub struct CaptureMonitor {
     packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     packet_dump: Option<PacketDump>,
     targets: CaptureExportSettings,
+    continuous: Option<crate::continuous::ContinuousCapture>,
 }
 
 impl CaptureMonitor {
@@ -192,6 +193,7 @@ impl CaptureMonitor {
             packet_rx,
             packet_dump,
             targets: CaptureExportSettings::default(),
+            continuous: None,
         })
     }
 
@@ -222,6 +224,15 @@ impl CaptureMonitor {
         self.run_capture(cmd_rx, &settings).await
     }
 
+    pub async fn run_continuous(
+        mut self,
+        cmd_rx: mpsc::UnboundedReceiver<CaptureCommand>,
+        latest: crate::continuous::ContinuousCapture,
+    ) -> Result<Option<GoodExport>> {
+        self.continuous = Some(latest);
+        self.run(cmd_rx, CaptureExportSettings::default()).await
+    }
+
     async fn run_capture(
         mut self,
         mut cmd_rx: mpsc::UnboundedReceiver<CaptureCommand>,
@@ -244,7 +255,7 @@ impl CaptureMonitor {
                     if state.elapsed_secs % 15 == 0 {
                         log_info!("抓包诊断：{}", "Capture diagnostics: {}", state.diagnostics());
                     }
-                    if state.elapsed_secs >= 300 {
+                    if self.continuous.is_none() && state.elapsed_secs >= 300 {
                         state.error = Some(format!("{}; {}", state.timeout_hint().1, state.diagnostics()));
                         log_warn!("抓包等待超时：{}", "Capture timed out: {}", yas::lang::localize(state.error.as_deref().unwrap()));
                     }
@@ -342,6 +353,14 @@ impl CaptureMonitor {
         }
     }
 
+    fn accepts_incremental_updates(&self) -> bool {
+        self.continuous.is_some()
+            && self
+                .state
+                .lock()
+                .is_ok_and(|state| state.has_characters && state.has_items)
+    }
+
     fn process_packet(&mut self, packet: Vec<u8>) {
         let decoded = self.sniffer.receive_packet(packet);
         if let Ok(mut state) = self.state.lock() {
@@ -354,6 +373,25 @@ impl CaptureMonitor {
             }
             state.has_key_exchange = captured;
         }
+        if self.continuous.is_some()
+            && matches!(
+                decoded,
+                Some(GamePacket::Connection(
+                    auto_artifactarium::ConnectionPacket::HandshakeRequested
+                        | auto_artifactarium::ConnectionPacket::Disconnected
+                ))
+            )
+        {
+            self.player_data.begin_capture();
+            self.continuous.as_ref().unwrap().reset();
+            let mut state = self.state.lock().expect("capture state poisoned");
+            let listener_ready = state.listener_ready;
+            *state = CaptureState {
+                capturing: true,
+                listener_ready,
+                ..CaptureState::default()
+            };
+        }
         let Some(GamePacket::Commands(commands)) = decoded else {
             return;
         };
@@ -361,6 +399,7 @@ impl CaptureMonitor {
         // Heuristic matching: try parsing every command as item/avatar packets
         // regardless of command_id.  This survives command ID rotation across
         // game versions.
+        let mut data_changed = false;
         for command in commands {
             self.state
                 .lock()
@@ -379,18 +418,29 @@ impl CaptureMonitor {
                     command.command_id,
                     achievement_ids.len(),
                 );
+                data_changed = true;
                 self.player_data.process_achievements(&achievement_ids);
                 if let Ok(mut state) = self.state.lock() {
                     state.has_achievements = true;
                     state.achievement_count = self.player_data.achievement_count();
                 }
-            } else if let Some(items) = try_match_items(&command.proto_data) {
+            } else if let Some(items) = try_match_items(&command.proto_data).or_else(|| {
+                if !self.accepts_incremental_updates() {
+                    return None;
+                }
+                if try_match_avatars(&command.proto_data).is_some() {
+                    return None;
+                }
+                let items = find_nested_items(&command.proto_data);
+                (!items.is_empty()).then_some(items)
+            }) {
                 log_info!(
                     "捕获到物品数据包 (cmd={})，共 {} 个物品",
                     "Captured item packet (cmd={}), {} items",
                     command.command_id,
                     items.len(),
                 );
+                data_changed = true;
                 self.player_data.process_items(&items);
                 if let Ok(mut state) = self.state.lock() {
                     state.weapon_count = self.player_data.weapon_count();
@@ -400,14 +450,29 @@ impl CaptureMonitor {
                     // batch before the artifact batch has arrived.
                     state.has_items = state.weapon_count > 0 && state.artifact_count > 0;
                 }
-            } else if let Some(avatars) = try_match_avatars(&command.proto_data) {
+            } else if let Some(avatars) = try_match_avatars(&command.proto_data).or_else(|| {
+                if !self.accepts_incremental_updates() {
+                    return None;
+                }
+                find_best_field::<AvatarInfo>(&command.proto_data, 1, |avatar| {
+                    avatar.avatar_type == 1
+                        && avatar.avatar_id >= 10_000_000
+                        && !avatar.prop_map.is_empty()
+                })
+                .map(|(_, avatars)| avatars)
+            }) {
                 log_info!(
                     "捕获到角色数据包 (cmd={})，共 {} 个角色",
                     "Captured avatar packet (cmd={}), {} avatars",
                     command.command_id,
                     avatars.len(),
                 );
-                self.player_data.process_characters(&avatars);
+                data_changed = true;
+                if self.continuous.is_some() {
+                    self.player_data.merge_characters(&avatars);
+                } else {
+                    self.player_data.process_characters(&avatars);
+                }
                 if let Ok(mut state) = self.state.lock() {
                     state.has_characters = true;
                     state.character_count = self.player_data.character_count();
@@ -433,7 +498,24 @@ impl CaptureMonitor {
             .state
             .lock()
             .is_ok_and(|state| state.selected_complete(&self.targets));
-        if should_stop {
+        if let Some(latest) = self.continuous.as_ref().filter(|_| data_changed) {
+            let state = self.state.lock().expect("capture state poisoned");
+            if state.has_characters && state.has_items {
+                let settings = CaptureExportSettings {
+                    include_achievements: state.has_achievements,
+                    ..self.targets.clone()
+                };
+                match self
+                    .player_data
+                    .export(&settings)
+                    .and_then(|data| Ok(serde_json::to_value(data)?))
+                {
+                    Ok(data) => latest.publish(data),
+                    Err(error) => latest.fail(error.to_string()),
+                }
+            }
+        }
+        if should_stop && self.continuous.is_none() {
             log_info!(
                 "已收集到所有数据，自动停止抓包",
                 "All data collected, stopping capture automatically"
@@ -1038,6 +1120,7 @@ mod tests {
             packet_rx,
             packet_dump: None,
             targets: CaptureExportSettings::default(),
+            continuous: None,
         }
     }
 

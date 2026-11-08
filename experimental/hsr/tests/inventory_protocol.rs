@@ -173,6 +173,74 @@ fn bag_for(tag: u32, relic_tag: u32, character_id: u32) -> Vec<u8> {
 }
 
 #[test]
+fn continuous_capture_merges_single_gear_updates_after_complete_inventory() {
+    let mut decoder = HsrPacketDecoder::new(
+        load_embedded_gilore_reference().unwrap(),
+        CaptureTargets {
+            achievements: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    decoder.enable_continuous();
+    let mut cone = Equipment {
+        tid: 23005,
+        unique_id: 77,
+        level: 70,
+        promotion: 5,
+        rank: 2,
+        equip_avatar_id: 1001,
+        is_protected: false,
+        ..Default::default()
+    };
+    // An isolated update cannot establish a complete inventory.
+    decoder
+        .receive_command(&group(53, &[cone.write_to_bytes().unwrap()]))
+        .unwrap();
+    assert!(!decoder.state().complete);
+    decoder.receive_command(&characters(13, 77)).unwrap();
+    decoder.receive_command(&bag(54, 65)).unwrap();
+    assert!(decoder.state().complete);
+    let before = decoder.state().inventory.clone().unwrap();
+    decoder
+        .receive_command(&group(53, &[cone.write_to_bytes().unwrap()]))
+        .unwrap();
+    let changed = decoder.state().inventory.clone().unwrap();
+    assert_eq!(changed.light_cones.len(), 1);
+    assert_eq!(changed.light_cones[0].level, 70);
+    assert_eq!(changed.light_cones[0].lock, Some(false));
+    assert_eq!(changed.gear, before.gear);
+    cone.unique_id = 79;
+    decoder
+        .receive_command(&group(995, &[cone.write_to_bytes().unwrap()]))
+        .unwrap();
+    assert_eq!(
+        decoder
+            .state()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .light_cones
+            .len(),
+        2
+    );
+    // Repeated packets must replace by instance ID, never duplicate gear.
+    decoder
+        .receive_command(&group(995, &[cone.write_to_bytes().unwrap()]))
+        .unwrap();
+    assert_eq!(
+        decoder
+            .state()
+            .inventory
+            .as_ref()
+            .unwrap()
+            .light_cones
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn rotated_outer_fields_and_nested_wrappers_export_inventory() {
     let references = load_embedded_gilore_reference().unwrap();
     for (a, b) in [(1, 2), (777, 991), (31, 42)] {

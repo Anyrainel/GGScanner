@@ -134,14 +134,33 @@ impl PlayerData {
     }
 
     pub fn process_characters(&mut self, avatars: &[AvatarInfo]) {
-        self.character_equip_guid_map.clear();
+        self.characters = avatars.to_vec();
+        self.rebuild_equipment_locations();
+    }
+
+    pub fn merge_characters(&mut self, avatars: &[AvatarInfo]) {
         for avatar in avatars {
+            if let Some(old) = self
+                .characters
+                .iter_mut()
+                .find(|old| old.guid == avatar.guid && old.avatar_id == avatar.avatar_id)
+            {
+                *old = avatar.clone();
+            } else {
+                self.characters.push(avatar.clone());
+            }
+        }
+        self.rebuild_equipment_locations();
+    }
+
+    fn rebuild_equipment_locations(&mut self) {
+        self.character_equip_guid_map.clear();
+        for avatar in &self.characters {
             for guid in &avatar.equip_guid_list {
                 self.character_equip_guid_map
                     .insert(*guid, avatar.avatar_id);
             }
         }
-        self.characters = avatars.into();
     }
 
     pub fn process_items(&mut self, items: &[Item]) {
@@ -193,6 +212,7 @@ impl PlayerData {
             format: "GOOD".to_string(),
             version: 3,
             source: "yas-GOODScanner".to_string(),
+            metadata: None,
             characters,
             weapons,
             artifacts,
@@ -535,11 +555,50 @@ mod tests {
         let export = player.export(&CaptureExportSettings::default()).unwrap();
         assert_eq!(export.format, "GOOD");
         assert_eq!(export.version, 3);
+        assert!(export.metadata.is_none());
+        assert!(serde_json::to_value(&export)
+            .unwrap()
+            .get("metadata")
+            .is_none());
         // Empty data → empty lists
         assert_eq!(export.characters.unwrap().len(), 0);
         assert_eq!(export.weapons.unwrap().len(), 0);
         assert_eq!(export.artifacts.unwrap().len(), 0);
         assert_eq!(export.achievements.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn character_updates_keep_other_characters_and_rebuild_locations() {
+        let cache = serde_json::from_str(r#"{"version":1,"git_hash":"test"}"#).unwrap();
+        let mut player = PlayerData::new(cache);
+        let first = AvatarInfo {
+            guid: 1,
+            avatar_id: 10000001,
+            avatar_type: 1,
+            equip_guid_list: vec![10],
+            ..Default::default()
+        };
+        let second = AvatarInfo {
+            guid: 2,
+            avatar_id: 10000002,
+            avatar_type: 1,
+            equip_guid_list: vec![20],
+            ..Default::default()
+        };
+        player.process_characters(&[first.clone(), second]);
+        let updated = AvatarInfo {
+            equip_guid_list: vec![30],
+            ..first
+        };
+        player.merge_characters(&[updated.clone()]);
+        player.merge_characters(&[updated]);
+        assert_eq!(player.character_count(), 2);
+        assert!(!player.character_equip_guid_map.contains_key(&10));
+        assert_eq!(player.character_equip_guid_map.get(&20), Some(&10000002));
+        assert_eq!(player.character_equip_guid_map.get(&30), Some(&10000001));
+        player.begin_capture();
+        assert_eq!(player.character_count(), 0);
+        assert!(player.character_equip_guid_map.is_empty());
     }
 
     #[test]

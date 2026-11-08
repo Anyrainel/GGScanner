@@ -42,6 +42,12 @@ returns the same ID without running twice. An explicit submission after a
 failed task gets a new ID and uses the retained journal for recovery. IDs stay
 distinct across server restarts. No POST is retried automatically by the client.
 
+
+### `GET /continuous`
+
+See [Continuous capture API](CONTINUOUS_CAPTURE.md) for the shared endpoint, error
+codes, snapshot format, and export policy.
+
 ## Results
 
 Manage success:

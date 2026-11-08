@@ -11,6 +11,75 @@ use std::{
 };
 use yas::cancel::{CancelToken, StopReason};
 
+#[test]
+fn continuous_endpoint_preserves_states_and_cors() {
+    use genshin_scanner::continuous::ContinuousCapture;
+    for enabled in [false, true] {
+        let server = tiny_http::Server::http(("127.0.0.1", 0)).unwrap();
+        let address = server.server_addr().to_string();
+        let capture = ContinuousCapture::default();
+        let http_capture = enabled.then(|| capture.clone());
+        let cancel = CancelToken::new();
+        let stop = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            good_tools_app::hsr_server::serve_continuous(
+                server,
+                http_capture,
+                stop,
+                Arc::new(Mutex::new(JobState::default())),
+                false,
+                |_, _| panic!("GET must not start a game job"),
+                || json!({}),
+            )
+            .unwrap();
+        });
+        let get = || request(&address, "GET", "/continuous", "", "http://localhost:3000");
+        assert_eq!(
+            get(),
+            if enabled {
+                (503, json!({"error":"continuous_capture_no_data"}))
+            } else {
+                (409, json!({"error":"continuous_capture_disabled"}))
+            }
+        );
+        capture.publish(json!({"format":"HSR-Scanner", "characters":[]}));
+        if enabled {
+            assert_eq!(get().0, 200);
+            assert_eq!(get().1["data"]["format"], "HSR-Scanner");
+            assert_eq!(
+                request(&address, "GET", "/continuous", "", "https://evil.example").0,
+                403
+            );
+            let first = get().1;
+            // A complete account switch can occur between polls. The response
+            // must carry the new generation and its identity together.
+            capture.reset();
+            capture.publish(json!({
+                "source":"HSR-Scanner", "version":4,
+                "metadata":{"uid":"800000002", "nickname":"Second account"},
+                "characters":[]
+            }));
+            let switched = get().1;
+            assert_ne!(first["sessionId"], switched["sessionId"]);
+            assert_eq!(switched["revision"], 1);
+            assert_eq!(switched["data"]["metadata"]["uid"], "800000002");
+            assert_eq!(switched["data"]["metadata"]["nickname"], "Second account");
+            capture.fail("listener closed".into());
+            assert_eq!(
+                get(),
+                (
+                    503,
+                    json!({"error":"continuous_capture_failed", "details":"listener closed"})
+                )
+            );
+        } else {
+            assert_eq!(get().0, 409);
+        }
+        cancel.cancel(StopReason::UserAbort);
+        thread.join().unwrap();
+    }
+}
+
 fn request(address: &str, method: &str, path: &str, body: &str, origin: &str) -> (u16, Value) {
     let mut stream = TcpStream::connect(address).unwrap();
     stream

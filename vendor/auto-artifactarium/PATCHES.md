@@ -5,10 +5,19 @@ Source: https://github.com/konkers/auto-artifactarium at
 
 The pinned source is kept locally to expose `key_exchange_captured()`, a boolean
 derived from the token response's successfully decoded session-seed candidates.
-No seeds or keys are exposed to the application. A new game handshake clears
-these candidates and the associated timestamp so a previous login cannot mark
-the next capture as ready. Decryption and token recognition remain upstream's
-implementation.
+No seeds or keys are exposed to the application.
 
-Tests exercise token recognition before inventory, ordinary dispatch packets,
-and a new handshake clearing the previous login state.
+Handshake requests and explicit disconnects now share a connection-state reset:
+both KCP directions, the discovered key, session-seed candidates, timestamp and
+retained client seed are discarded. A disconnect also blocks subsequent KCP
+segments until a new handshake request is observed. Delayed packets from the
+closed connection cannot repopulate the cleared inventory while that request is pending.
+Initial late-start capture remains allowed as before. The generic established
+control event alone cannot reopen a closed stream, because the existing parser
+also uses that event for unknown short control codes.
+
+These changes do not alter the upstream cryptographic algorithms or token
+recognition. Tests exercise token recognition before inventory, ordinary
+dispatch packets, handshake reset and synthetic encrypted KCP frames in both
+directions: post-disconnect frames remain blocked until a new login request.
+No private capture frames or session material are included in the tests.

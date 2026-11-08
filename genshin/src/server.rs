@@ -560,6 +560,7 @@ fn cors_headers(origin: &str) -> Vec<Header> {
 /// `origin`: the validated origin to echo back, or None for non-browser clients.
 fn respond_json(request: tiny_http::Request, status: u16, json: &str, origin: Option<&str>) {
     let mut resp = Response::from_string(json).with_status_code(status);
+    resp.add_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
     if let Some(o) = origin {
         for header in cors_headers(o) {
             resp.add_header(header);
@@ -721,6 +722,31 @@ pub fn run_server_observed<F>(
     dump_job_data: bool,
     status_fn: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     native_job: Option<Arc<Mutex<JobState>>>,
+) -> Result<()>
+where
+    F: FnMut() -> anyhow::Result<Box<dyn ManageExecutor>>,
+{
+    run_server_observed_continuous(
+        port,
+        init_executor,
+        enabled,
+        shutdown,
+        dump_job_data,
+        status_fn,
+        native_job,
+        None,
+    )
+}
+
+pub fn run_server_observed_continuous<F>(
+    port: u16,
+    init_executor: F,
+    enabled: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    dump_job_data: bool,
+    status_fn: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    native_job: Option<Arc<Mutex<JobState>>>,
+    continuous: Option<crate::continuous::ContinuousCapture>,
 ) -> Result<()>
 where
     F: FnMut() -> anyhow::Result<Box<dyn ManageExecutor>>,
@@ -970,6 +996,12 @@ where
                             }
                         },
                     }
+                },
+
+                (Method::Get, "/continuous") => {
+                    let (status, body) =
+                        crate::continuous::ContinuousCapture::response(continuous.as_ref());
+                    respond_json(request, status, &body.to_string(), cors_ref);
                 },
 
                 // Health check — includes game window liveness.
@@ -2636,6 +2668,88 @@ mod tests {
             }
         }
         panic!("Job did not complete within timeout");
+    }
+
+    #[test]
+    fn continuous_endpoint_states_and_origin_checks() {
+        let _guard = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for enabled in [false, true] {
+            let port = next_port();
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let stop = shutdown.clone();
+            let latest = crate::continuous::ContinuousCapture::default();
+            let http_latest = enabled.then(|| latest.clone());
+            let thread = std::thread::spawn(move || {
+                run_server_observed_continuous(
+                    port,
+                    || -> anyhow::Result<Box<dyn ManageExecutor>> {
+                        panic!("GET must not initialize OCR");
+                    },
+                    Arc::new(AtomicBool::new(true)),
+                    stop,
+                    false,
+                    None,
+                    None,
+                    http_latest,
+                )
+                .unwrap();
+            });
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/continuous");
+            for _ in 0..50 {
+                if client.get(&url).send().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let get = || {
+                client
+                    .get(&url)
+                    .header("Origin", "http://localhost:3000")
+                    .send()
+                    .unwrap()
+            };
+            let response = get();
+            assert_eq!(response.status().as_u16(), if enabled { 503 } else { 409 });
+            assert_eq!(
+                response.headers()["Access-Control-Allow-Origin"],
+                "http://localhost:3000"
+            );
+            assert_eq!(
+                response.json::<serde_json::Value>().unwrap()["error"],
+                if enabled {
+                    "continuous_capture_no_data"
+                } else {
+                    "continuous_capture_disabled"
+                }
+            );
+            latest.publish(serde_json::json!({"format":"GOOD", "version":3}));
+            if enabled {
+                let response = get();
+                assert_eq!(response.status().as_u16(), 200);
+                assert_eq!(response.headers()["Cache-Control"], "no-store");
+                assert_eq!(
+                    response.json::<serde_json::Value>().unwrap()["data"]["format"],
+                    "GOOD"
+                );
+                assert_eq!(
+                    client
+                        .get(&url)
+                        .header("Origin", "https://evil.example")
+                        .send()
+                        .unwrap()
+                        .status()
+                        .as_u16(),
+                    403
+                );
+                latest.fail("listener closed".into());
+                assert_eq!(
+                    get().json::<serde_json::Value>().unwrap()["error"],
+                    "continuous_capture_failed"
+                );
+            }
+            stop_server(&shutdown, thread);
+        }
     }
 
     #[test]

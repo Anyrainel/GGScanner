@@ -101,6 +101,11 @@ pub fn show_status(
     });
     ui.add_space(12.0);
     widgets::server_port(ui, l, &mut state.server_port, !running && !game_busy);
+    #[cfg(all(feature = "capture", target_os = "windows"))]
+    ui.add_enabled_ui(!running && !game_busy, |ui| {
+        ui.checkbox(&mut state.user_config.continuous_capture, l.t("持续抓包同步", "Continuous capture sync"))
+            .on_hover_text(l.t("启动服务器后持续接收游戏数据，每十分钟保存有变化的最新导出。请在登录游戏前启动。", "Receive game data while the server runs and save changed exports every ten minutes. Start before logging in."));
+    });
     if running {
         let stopping = handle.as_ref().is_some_and(TaskHandle::is_stopping);
         if super::theme::primary_action(

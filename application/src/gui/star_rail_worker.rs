@@ -638,7 +638,21 @@ pub fn spawn_manager_server(
                 })?;
             *status_worker.lock().unwrap() =
                 TaskStatus::Running(UiText::new("等待网站请求", "Waiting for a website request"));
-            crate::hsr_server::serve(server, cancel, job, settings.dump_job_data,
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            let continuous_session = settings.continuous_capture.then(|| {
+                super::continuous_capture::Session::star_rail(if settings.output_dir.is_empty() {
+                    genshin_scanner::cli::exe_dir()
+                } else {
+                    PathBuf::from(&settings.output_dir)
+                })
+            });
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            let continuous = continuous_session
+                .as_ref()
+                .map(|session| session.latest.clone());
+            #[cfg(not(all(feature = "capture", target_os = "windows")))]
+            let continuous = None;
+            crate::hsr_server::serve_continuous(server, continuous, cancel, job, settings.dump_job_data,
                 move |request, job_cancel| {
                     progress.lock().unwrap().steps.clear();
                     *status_worker.lock().unwrap() = TaskStatus::Running(UiText::new("正在启动任务", "Starting task"));

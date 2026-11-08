@@ -6,14 +6,14 @@
 //! decrypted-command fixtures.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex},
 };
 
-use crate::network::{GamePacket, GameSniffer};
+use crate::network::{AccountIdentity, GamePacket, GameSniffer, IdentityUpdate, PacketDirection};
 use crate::{
     model::{
         CoverageLevel, EvidenceKind, InventoryCoverage, ObservationEvidence, ObservationSnapshot,
@@ -105,6 +105,9 @@ pub struct HsrPacketDecoder {
     targets: CaptureTargets,
     state: HsrCaptureState,
     conversation: Option<u32>,
+    account: Option<AccountIdentity>,
+    identity_required: bool,
+    retired_conversations: HashSet<u32>,
 }
 
 impl HsrPacketDecoder {
@@ -129,7 +132,14 @@ impl HsrPacketDecoder {
             targets,
             state: HsrCaptureState::default(),
             conversation: None,
+            account: None,
+            identity_required: false,
+            retired_conversations: HashSet::new(),
         })
+    }
+
+    pub fn enable_continuous(&mut self) {
+        self.inventory.continuous = true;
     }
 
     pub fn state(&self) -> &HsrCaptureState {
@@ -143,6 +153,11 @@ impl HsrPacketDecoder {
 
     /// Full packet replay and live capture use exactly the same transport.
     pub fn receive_packet(&mut self, packet: Vec<u8>) -> HsrResult<()> {
+        // One-shot monitors stop at the first complete capture. Preserve that
+        // historical result when offline replay includes later disconnects.
+        if self.state.complete && !self.inventory.continuous {
+            return Ok(());
+        }
         if let Some(dump) = &mut self.packet_dump {
             dump.write_raw(&packet)?;
         }
@@ -158,8 +173,20 @@ impl HsrPacketDecoder {
             match packet {
                 GamePacket::Commands {
                     conv_id,
-                    result: Ok(command),
+                    direction,
+                    result: Ok(decoded),
                 } => {
+                    if direction != PacketDirection::Received
+                        || self.retired_conversations.contains(&conv_id)
+                    {
+                        continue;
+                    }
+                    if let Some(update) = decoded.identity_update {
+                        self.receive_identity(conv_id, update);
+                    }
+                    if self.identity_required && self.conversation.is_none() {
+                        continue;
+                    }
                     if self
                         .conversation
                         .is_some_and(|selected| selected != conv_id)
@@ -167,7 +194,7 @@ impl HsrPacketDecoder {
                         continue;
                     }
                     self.state.command_count += 1;
-                    self.receive_command(&command.proto_data)?;
+                    self.receive_command(&decoded.command.proto_data)?;
                     if self.state.has_characters
                         || self.state.has_light_cones
                         || self.state.has_relics
@@ -186,10 +213,32 @@ impl HsrPacketDecoder {
                     }
                     self.state.last_transport_error = Some(error.to_string());
                 },
-                GamePacket::Connection(connection) => {
-                    if matches!(connection, crate::network::ConnectionPacket::Disconnected) {
+                GamePacket::Connection(connection) => match connection {
+                    crate::network::ConnectionPacket::Disconnected { conv_id }
+                        if self.conversation == Some(conv_id) =>
+                    {
+                        self.retired_conversations.insert(conv_id);
+                        self.clear_inventory_session();
                         self.state.last_transport_error = Some("game connection closed".to_owned());
-                    }
+                    },
+                    crate::network::ConnectionPacket::HandshakeEstablished { conv_id }
+                        if !self.retired_conversations.contains(&conv_id)
+                            && self.conversation != Some(conv_id) =>
+                    {
+                        if let Some(previous) = self.conversation {
+                            self.retired_conversations.insert(previous);
+                        }
+                        self.clear_inventory_session();
+                        self.conversation = Some(conv_id);
+                        // Unknown protocol identity can still provide an anonymous
+                        // baseline after a trusted new transport start, never from
+                        // delayed packets belonging to a retired account.
+                        self.identity_required = false;
+                    },
+                    // A request has no scoped conversation ID. Wait for the
+                    // establishment/token instead of invalidating another account
+                    // because of a delayed request or foreign disconnect.
+                    _ => {},
                 },
             }
         }
@@ -230,15 +279,51 @@ impl HsrPacketDecoder {
         if self.state.complete {
             self.state.inventory = self.inventory.snapshot();
             self.state.export_details = self.inventory.export_details.clone();
+            if let Some(account) = &self.account {
+                self.state.export_details.uid = Some(u64::from(account.uid));
+                self.state.export_details.nickname = account.nickname.clone();
+            }
         }
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.sniffer = GameSniffer::new().set_initial_keys(self.dispatch_keys.clone());
+    fn clear_inventory_session(&mut self) {
+        let session_generation = self.state.session_generation + 1;
         self.inventory.reset();
         self.conversation = None;
-        self.state = HsrCaptureState::default();
+        self.account = None;
+        self.state = HsrCaptureState {
+            session_generation,
+            ..HsrCaptureState::default()
+        };
+    }
+
+    fn receive_identity(&mut self, conv_id: u32, update: IdentityUpdate) {
+        if update.new_login {
+            if let Some(previous) = self.conversation.filter(|previous| *previous != conv_id) {
+                self.retired_conversations.insert(previous);
+            }
+            self.clear_inventory_session();
+            self.identity_required = true;
+            self.conversation = Some(conv_id);
+            self.account = Some(update.account);
+        } else if self.conversation == Some(conv_id)
+            && self
+                .account
+                .as_ref()
+                .is_some_and(|account| account.uid == update.account.uid)
+        {
+            self.account = Some(update.account);
+            // Metadata changes must be observable even without an item mutation.
+            self.inventory.revision += 1;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.sniffer = GameSniffer::new().set_initial_keys(self.dispatch_keys.clone());
+        self.clear_inventory_session();
+        self.identity_required = false;
+        self.retired_conversations.clear();
     }
 }
 
@@ -254,6 +339,8 @@ pub enum HsrCaptureCommand {
 /// Privacy-safe state shared with the UI.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HsrCaptureState {
+    /// Changes when login/account/reconnect invalidates the previous baseline.
+    pub session_generation: u64,
     pub listener_ready: bool,
     pub elapsed_secs: u64,
     pub capturing: bool,
@@ -371,6 +458,7 @@ pub struct HsrCaptureMonitor {
     capture_task: Option<JoinHandle<HsrResult<()>>>,
     terminal_stop_requested: bool,
     started: Option<tokio::time::Instant>,
+    continuous: Option<Box<dyn Fn(&HsrCaptureState) + Send>>,
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 }
@@ -390,6 +478,7 @@ impl HsrCaptureMonitor {
             capture_task: None,
             terminal_stop_requested: false,
             started: None,
+            continuous: None,
             packet_tx,
             packet_rx,
         })
@@ -398,6 +487,12 @@ impl HsrCaptureMonitor {
     /// Enabling diagnostics performs no I/O until a decrypted command arrives.
     pub fn with_packet_dump(mut self, root: std::path::PathBuf) -> Self {
         self.decoder.set_packet_dump(root);
+        self
+    }
+
+    pub fn with_continuous(mut self, observer: impl Fn(&HsrCaptureState) + Send + 'static) -> Self {
+        self.decoder.enable_continuous();
+        self.continuous = Some(Box::new(observer));
         self
     }
 
@@ -480,16 +575,25 @@ impl HsrCaptureMonitor {
         if self.started.is_none() {
             return;
         }
+        let previous_revision = self.decoder.inventory.revision;
+        let previous_generation = self.decoder.state.session_generation;
         match catch_unwind(AssertUnwindSafe(|| self.decoder.receive_packet(packet))) {
             Ok(Ok(())) => {
                 let mut snapshot = self.decoder.state().clone();
-                snapshot.capturing = !snapshot.complete;
-                if snapshot.complete {
+                snapshot.capturing = self.continuous.is_some() || !snapshot.complete;
+                if snapshot.complete && self.continuous.is_none() {
                     self.stop_capture();
                 }
                 if let Ok(mut state) = self.state.lock() {
                     snapshot.listener_ready = state.listener_ready;
                     snapshot.elapsed_secs = state.elapsed_secs;
+                    if self.decoder.inventory.revision != previous_revision
+                        || snapshot.session_generation != previous_generation
+                    {
+                        if let Some(observer) = &self.continuous {
+                            observer(&snapshot);
+                        }
+                    }
                     *state = snapshot;
                 }
             },
@@ -514,10 +618,9 @@ impl HsrCaptureMonitor {
                 );
             }
         }
-        if self
-            .started
-            .is_some_and(|start| start.elapsed().as_secs() >= CAPTURE_TIMEOUT_SECS)
-        {
+        if self.started.is_some_and(|start| {
+            self.continuous.is_none() && start.elapsed().as_secs() >= CAPTURE_TIMEOUT_SECS
+        }) {
             let shared = self.state.lock().expect("capture state poisoned").clone();
             let mut snapshot = self.decoder.state().clone();
             snapshot.listener_ready = shared.listener_ready;
@@ -582,6 +685,9 @@ impl HsrCaptureMonitor {
         if let Ok(mut state) = self.state.lock() {
             state.complete = false;
             state.error = Some(error);
+            if let Some(observer) = &self.continuous {
+                observer(&state);
+            }
         }
     }
 }
@@ -968,3 +1074,6 @@ mod tests {
         assert!(!decoder.state.has_key_exchange);
     }
 }
+
+#[cfg(test)]
+mod identity_tests;

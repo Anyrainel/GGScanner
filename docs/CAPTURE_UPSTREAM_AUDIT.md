@@ -79,3 +79,32 @@ tests selected by the capture filter, and all 205 HSR tests with capture enabled
 This review establishes agreement with published references and deterministic
 replays. It does not establish a fresh live login/capture on either game or
 detect key/protocol changes the upstream projects have not published.
+
+## Account identity extension — 2026-11-08
+
+Reviewed Reliquary `938287c5cbba930ad68aa3f7010cf7ad953bc654`
+(24.0.1). The previously watched upstream files are unchanged except for the
+Cargo package version, from 24.0.0 to 24.0.1. Added `PlayerLoginScRsp.rs` and
+`PlayerBasicInfo.rs` to the watched source set alongside the existing token type.
+
+The local HSR identity reader accepts only incoming token/login commands under
+the reviewed 4.6 dispatch-key identifier and exact success layouts. UID and
+nickname stay attached to one KCP conversation. Existing retained raw frames
+were replayed through the production decoder: exported UID and nickname matched
+the same login, opaque item IDs were unique, and no transport errors occurred.
+Private frames and exports remain outside source control. Synthetic tests cover
+account switches, retired traffic, reconnects, unidentified-layout fallback,
+normal/continuous exports and stable item identities across upgrades.
+
+The local connection wrapper now retains the disconnect conversation ID rather
+than invalidating whichever account happens to be selected. The Genshin vendor
+wrapper clears KCP/key/seed/client-seed state on disconnect and rejects delayed
+segments until an explicit new handshake request; the cryptographic operations
+remain unchanged. Its synthetic encrypted-packet regression and full library
+tests pass. These intentional wrapper changes and the new HSR identity module
+have reviewed local fingerprints in `capture-upstreams.json`.
+
+Genshin UID/nickname detection remains unverified for current official-server
+packets. Optional GOOD identity metadata is supported, but current capture does
+not invent identity. Websites use the user's selected-profile fallback when UID
+is absent. No fresh live-game capture is claimed by this validation.

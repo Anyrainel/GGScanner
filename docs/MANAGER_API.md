@@ -653,6 +653,12 @@ The `jobId` parameter is **optional** for backwards compatibility:
 - Manage/equip jobs **invalidate** the cache when they start (before execution) if they will modify in-game state, so clients must not read stale `GET /artifacts` during a running job.
 - All cached data persists in memory for the server's lifetime. It is not written to disk.
 
+
+### `GET /continuous`
+
+See [Continuous capture API](CONTINUOUS_CAPTURE.md) for the shared endpoint, error
+codes, snapshot format, and export policy.
+
 ## Client Flow
 
 ### Manage / Equip

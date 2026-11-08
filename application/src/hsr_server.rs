@@ -130,6 +130,7 @@ fn handle(
     progress: &impl Fn() -> Value,
     cancel: &CancelToken,
     dump_job_data: bool,
+    continuous: Option<&genshin_scanner::continuous::ContinuousCapture>,
 ) {
     let origin = request
         .headers()
@@ -153,6 +154,11 @@ fn handle(
     if request.method() == &Method::Get {
         let state = shared.lock().unwrap().clone();
         match path {
+            "/continuous" => {
+                let (status, body) =
+                    genshin_scanner::continuous::ContinuousCapture::response(continuous);
+                reply(request, status, body, origin);
+            },
             "/health" => reply(
                 request,
                 200,
@@ -332,6 +338,26 @@ pub fn serve(
     execute: impl FnMut(Job, CancelToken) -> Result<Value, Value>,
     progress: impl Fn() -> Value + Send + Sync,
 ) -> anyhow::Result<()> {
+    serve_continuous(
+        server,
+        None,
+        cancel,
+        state,
+        dump_job_data,
+        execute,
+        progress,
+    )
+}
+
+pub fn serve_continuous(
+    server: Server,
+    continuous: Option<genshin_scanner::continuous::ContinuousCapture>,
+    cancel: CancelToken,
+    state: Arc<Mutex<JobState>>,
+    dump_job_data: bool,
+    execute: impl FnMut(Job, CancelToken) -> Result<Value, Value>,
+    progress: impl Fn() -> Value + Send + Sync,
+) -> anyhow::Result<()> {
     let (sender, receiver) = mpsc::channel();
     let done = CancelToken::new();
     struct StopOnDrop(CancelToken);
@@ -361,6 +387,7 @@ pub fn serve(
                         &progress,
                         &cancel_http,
                         dump_job_data,
+                        continuous.as_ref(),
                     ),
                     Ok(None) => {},
                     Err(error) => return Err(anyhow::anyhow!(error)),

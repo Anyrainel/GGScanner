@@ -66,8 +66,10 @@ Fribbels currently allowlists `HSR-Scanner` as a source string. The interchange
 file uses that required v4 compatibility discriminator and its compatible
 build identifier; a separate `generator` object keeps the historical GOODScanner name and
 its capture revision. It does not claim to have been captured by Kel-Z's tool.
-Server item IDs are replaced with local synthetic identifiers; account UID is
-null. The primary format references are
+Native server item IDs are never exported. Verified capture accounts receive
+stable opaque item IDs; anonymous/OCR exports retain scan-order IDs. UID and
+optional nickname come from the reviewed incoming login; see the identity
+section below. The primary format references are
 [Fribbels' parser](https://github.com/fribbels/hsr-optimizer/blob/main/src/lib/importer/kelzFormatParser.tsx)
 and [import configuration](https://github.com/fribbels/hsr-optimizer/blob/main/src/lib/importer/importConfig.ts).
 
@@ -160,3 +162,30 @@ The native Capture screen was inspected in English and Chinese.
 A fresh login against the rebuilt binary remains the final live check. Replay
 fixtures are synthetic, not captured player traffic. No live-success claim is
 made from those fixtures.
+
+
+## Captured account identity
+
+The reviewed HSR 4.6 incoming login layout exposes UID in
+`PlayerGetTokenScRsp` (command 16, field 15), and nickname in
+`PlayerLoginScRsp` (command 25, field 4 `PlayerBasicInfo`, then field 1).
+The decoder pins identity parsing to dispatch-key identifier `2920436228` and
+the schemas in Reliquary commit `938287c5cbba930ad68aa3f7010cf7ad953bc654`:
+[token](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerGetTokenScRsp.rs),
+[login](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerLoginScRsp.rs), and
+[basic info](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerBasicInfo.rs).
+Unknown revisions, failed responses, outgoing requests and arbitrary matching
+integers/strings never establish identity. Existing local raw login frames
+confirmed populated fields in this layout; private frames are not test fixtures.
+
+Identity is retained per KCP conversation. A verified new login clears the
+previous inventory and identity before selecting that conversation; delayed
+commands and disconnects from a retired conversation cannot update or invalidate
+the new account. A fresh established conversation, verified token, or selected
+conversation disconnect invalidates the baseline and advances its generation.
+An unknown identity schema can still publish an anonymous baseline after a fresh
+transport establishment; it cannot inherit the previous account’s identity. Both normal capture and continuous sync use the same public v4
+export builder. A fresh baseline is required before publishing its UID, optional
+nickname and account-scoped opaque item IDs; see `HSR_EXPORT.md`.
+The UID is an account-routing key and the nickname is display text, not proof of
+account ownership. Supporting a new inner login schema requires explicit review.

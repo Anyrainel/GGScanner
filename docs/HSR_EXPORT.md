@@ -15,7 +15,7 @@ compatibility with existing exports.
 `star_rail_scan_`），避免互相覆盖。GGScanner 的 `source` 固定为 `HSR-Scanner`，
 真正的生成器写在 `generator` 里。截图扫描会读取画面上能看到的技能/行迹文字；
 无法从画面读出的字段（成就数据包、`ability_version` 等）省略，不另起一套 schema。
-截图扫描把左下角水印里的 UID 写入 `metadata.uid`（整数；需两个画面读数一致才采用，否则为 `null`）；抓包导出始终为 `null`。
+截图扫描把左下角水印里的 UID 写入 `metadata.uid`（整数；需两个画面读数一致才采用，否则为 `null`）；抓包导出使用同一登录会话中验证得到的 UID，并可附带游戏昵称 `metadata.nickname`。
 
 ## Required v4 fields / 必填 v4 字段
 
@@ -24,7 +24,7 @@ compatibility with existing exports.
 | `source` | `"HSR-Scanner"` (format discriminator, not the binary name) |
 | `build` | `"v1.2.0"` (Fribbels compatibility identifier) |
 | `version` | `4` |
-| `metadata.uid` | Screenshot scans: the account UID (integer) read from the bottom-left on-screen watermark, accepted once two panels read the same value, else `null`. Packet capture: always `null`. Importers discard this field; it is never read back. |
+| `metadata.uid` | Screenshot scans: the account UID (integer) read from the bottom-left on-screen watermark, accepted once two panels read the same value, else `null`. Packet capture: the UID from the reviewed incoming token response, tied to the inventory’s KCP conversation; `null` if not verified. Continuous sync consumers may use it to select the matching game account. |
 | `metadata.trailblazer` | `"Stelle"` or `"Caelus"`, else `null` |
 | `characters[]` | `id` (string), `name`, `path`, `level`, `ascension`, `eidolon`. Packet captures also include `ability_version` and single-unlock `traces` flags. Screenshot OCR fills upgradeable `skills` (Basic, Skill, Ultimate, Talent, plus `elation` on Elation characters) and optional `memosprite` levels. Screenshot scans do not read or export one-time trace-node flags; `traces.special` is such a flag, separate from the upgradeable `skills.elation` level. `ability_version` is omitted because it is not on-screen text. |
 | `light_cones[]` | `id` (string), `name`, `level`, `ascension`, `superimposition`, `location`, `lock`, `_uid` |
@@ -34,7 +34,15 @@ compatibility with existing exports.
 Preservation, Abundance, Remembrance, Elation.
 
 `location` is the equipped character template ID as a string, or `""`.
-`_uid` is a local synthetic instance id, never a server item id.
+`_uid` is never a raw server item ID. When `generator.itemIdentity` equals
+`account-instance-v1`, the export has a verified UID and complete aligned capture
+instance records; `_uid` is a stable lowercase SHA-256 hex string scoped to that
+game account and item family. Upgrading an item or reconnecting the same account
+preserves it; another account gets different IDs. Without that exact flag,
+including OCR and anonymous exports, `_uid` remains a scan-order synthetic ID.
+`metadata.nickname`, when present, is the same login’s in-game display name; it
+is mutable and nonunique and must never be used as an account matching key.
+Internal semantic observations and manager schemas remain anonymous.
 
 Percent substats use a trailing `_` (`CRIT Rate_`, `HP_`). Flat stats do not.
 

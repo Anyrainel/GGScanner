@@ -2,6 +2,8 @@
 mod capture_status;
 #[cfg(all(feature = "capture", target_os = "windows"))]
 pub mod capture_tab;
+#[cfg(all(feature = "capture", target_os = "windows"))]
+mod continuous_capture;
 pub mod credits;
 pub mod data_refresh;
 mod file_location;

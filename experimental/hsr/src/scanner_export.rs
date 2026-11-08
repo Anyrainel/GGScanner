@@ -1,8 +1,8 @@
 //! HSR-Scanner v4 interchange, as consumed by Fribbels and Reliquary clients.
 //! `source` is the importer's required format discriminator; `generator` records
-//! the actual producer. The only account identifier exported is the UID the
-//! screenshot scanner reads from the on-screen watermark (`metadata.uid`, as
-//! HSR-Scanner does); server item ids are never exported. See `docs/HSR_EXPORT.md`.
+//! the actual producer. Capture exports include the verified login UID and optional
+//! nickname; screenshot scans may read the UID watermark. Native server item IDs
+//! are never exported. See `docs/HSR_EXPORT.md`.
 //!
 //! Screenshot OCR and packet capture both write this shape. OCR omits fields it
 //! cannot observe rather than emitting a second schema.
@@ -13,6 +13,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -33,8 +34,28 @@ pub struct CaptureExportDetails {
     pub characters: BTreeMap<u32, CharacterDetails>,
     pub trailblazer: Option<String>,
     pub current_trailblazer_path: Option<String>,
-    /// Screenshot scans read the on-screen UID watermark; capture leaves it unset.
+    /// Capture: verified incoming login identity; OCR: agreed on-screen watermark.
     pub uid: Option<u64>,
+    pub nickname: Option<String>,
+    /// Private instance IDs aligned with deterministic normalized capture order.
+    /// These are hashed with the account UID before public export.
+    pub instance_ids: Option<CaptureInstanceIds>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CaptureInstanceIds {
+    pub light_cones: Vec<u32>,
+    pub relics: Vec<u32>,
+}
+
+fn opaque_instance_id(uid: u64, family: &[u8], instance: u32) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"GGScanner\0hsr\0account-instance-v1\0");
+    hash.update(uid.to_be_bytes());
+    hash.update(family);
+    hash.update([0]);
+    hash.update(instance.to_be_bytes());
+    hex::encode(hash.finalize())
 }
 
 pub fn build_scanner_export(
@@ -43,6 +64,24 @@ pub fn build_scanner_export(
     details: &CaptureExportDetails,
     completed_achievement_ids: Option<&[u32]>,
 ) -> HsrResult<Value> {
+    let stable_ids = details
+        .uid
+        .zip(details.instance_ids.as_ref())
+        .filter(|(uid, ids)| {
+            let valid = |values: &[u32], count: usize| {
+                values.len() == count
+                    && values.iter().all(|id| *id > 0)
+                    && values
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == count
+            };
+            (100_000_000..=u64::from(u32::MAX)).contains(uid)
+                && valid(&ids.light_cones, snapshot.light_cones.len())
+                && valid(&ids.relics, snapshot.gear.len())
+        });
     let mut characters = Vec::new();
     for c in &snapshot.characters {
         let r = refs
@@ -72,7 +111,8 @@ pub fn build_scanner_export(
         cones.push(json!({"id": c.light_cone_id.to_string(), "name": r.name.en,
             "level": c.level, "ascension": c.ascension, "superimposition": c.superimposition,
             "location": location(c.equipped_character_id), "lock": c.lock.unwrap_or(false),
-            "_uid": (index + 1).to_string()}));
+            "_uid": stable_ids.map(|(uid, ids)| opaque_instance_id(uid, b"light-cone", ids.light_cones[index]))
+                .unwrap_or_else(|| (index + 1).to_string())}));
     }
     let mut relics = Vec::new();
     for (index, g) in snapshot.gear.iter().enumerate() {
@@ -99,7 +139,8 @@ pub fn build_scanner_export(
             "rarity": r.rarity, "level": g.level, "mainstat": mainstat_name(&g.main_stat_key)?,
             "substats": subs, "location": location(g.equipped_character_id),
             "lock": g.lock.unwrap_or(false), "discard": g.discard.unwrap_or(false),
-            "_uid": (index + 1).to_string()}));
+            "_uid": stable_ids.map(|(uid, ids)| opaque_instance_id(uid, b"relic", ids.relics[index]))
+                .unwrap_or_else(|| (index + 1).to_string())}));
     }
     let trailblazer = details.trailblazer.as_deref().or_else(|| {
         snapshot
@@ -109,6 +150,9 @@ pub fn build_scanner_export(
     });
     let mut metadata = Map::new();
     metadata.insert("uid".into(), json!(details.uid));
+    if let Some(nickname) = &details.nickname {
+        metadata.insert("nickname".into(), json!(nickname));
+    }
     metadata.insert("trailblazer".into(), json!(trailblazer));
     if let Some(path) = &details.current_trailblazer_path {
         metadata.insert("current_trailblazer_path".into(), json!(path));
@@ -119,6 +163,9 @@ pub fn build_scanner_export(
             "captureRevision": snapshot.evidence.revision, "compatibility": "HSR-Scanner v1.2.0 / format v4"},
         "metadata": metadata,
         "coverage": snapshot.evidence.coverage, "characters": characters, "light_cones": cones, "relics": relics});
+    if stable_ids.is_some() {
+        export["generator"]["itemIdentity"] = json!("account-instance-v1");
+    }
     // Presence is authoritative, including []. Absence means achievements were not observed.
     // TODO(ocr): completed achievements are not visible inventory text; omit the field.
     if let Some(ids) = completed_achievement_ids {

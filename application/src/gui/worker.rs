@@ -1057,6 +1057,8 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
     *job.lock().unwrap() = genshin_scanner::manager::models::JobState::idle();
     let user_config = state.user_config.clone();
     let port = state.server_port;
+    #[cfg(all(feature = "capture", target_os = "windows"))]
+    let continuous_dir = std::path::PathBuf::from(&state.output_dir);
     let enabled = state.server_enabled.clone();
     // GUI management always filters target sets. The legacy CLI preference
     // remains available to command-line callers, but is not a GUI setting.
@@ -1131,7 +1133,17 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
                 );
             });
 
-            match genshin_scanner::cli::run_server_core_observed(
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            let continuous_session = user_config
+                .continuous_capture
+                .then(|| super::continuous_capture::Session::genshin(continuous_dir));
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            let continuous = continuous_session
+                .as_ref()
+                .map(|session| session.latest.clone());
+            #[cfg(not(all(feature = "capture", target_os = "windows")))]
+            let continuous = None;
+            match genshin_scanner::cli::run_server_core_observed_continuous(
                 &user_config,
                 port,
                 &genshin_scanner::cli::OcrEngineArgs::default(),
@@ -1143,6 +1155,7 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
                 dump_job_data,
                 Some(status_fn),
                 Some(job),
+                continuous,
             ) {
                 Ok(()) => {
                     *status.lock().unwrap() =

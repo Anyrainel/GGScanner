@@ -14,9 +14,13 @@ use super::{
 use crate::{model::*, reference::ReferenceCache, HsrError, HsrResult, LocalizedText};
 
 pub struct InventoryDecoder {
+    pub continuous: bool,
+    pub(super) revision: u64,
     references: ReferenceCache,
     targets: CaptureTargets,
     affixes: PacketReferences,
+    cones_by_id: BTreeMap<u32, Equipment>,
+    relics_by_id: BTreeMap<u32, Relic>,
     pub export_details: crate::scanner_export::CaptureExportDetails,
     pub characters: Option<Vec<ObservedCharacter>>,
     pub light_cones: Option<Vec<ObservedLightCone>>,
@@ -30,6 +34,10 @@ impl InventoryDecoder {
             .cloned()
             .ok_or_else(|| invalid("capture reference has no packet tables"))?;
         Ok(Self {
+            continuous: false,
+            revision: 0,
+            cones_by_id: BTreeMap::new(),
+            relics_by_id: BTreeMap::new(),
             references,
             targets,
             affixes,
@@ -41,6 +49,9 @@ impl InventoryDecoder {
     }
 
     pub fn reset(&mut self) {
+        self.revision = 0;
+        self.cones_by_id.clear();
+        self.relics_by_id.clear();
         self.export_details = Default::default();
         self.characters = None;
         self.light_cones = None;
@@ -87,7 +98,7 @@ impl InventoryDecoder {
     }
 
     pub fn receive(&mut self, bytes: &[u8]) -> HsrResult<()> {
-        if self.complete() {
+        if self.complete() && !self.continuous {
             return Ok(());
         }
         for container in containers(bytes) {
@@ -124,7 +135,10 @@ impl InventoryDecoder {
                         .all(|s| s.point_id > 0 && s.level <= 20))
                 .then_some(value)
             });
-            if self.targets.characters && self.characters.is_none() && has_get_all {
+            if self.targets.characters
+                && (self.characters.is_none() || self.continuous)
+                && (has_get_all || (self.continuous && self.characters.is_some()))
+            {
                 if let (Some((_, bases)), Some((_, paths))) = (bases, paths) {
                     let bases: BTreeMap<_, _> =
                         bases.into_iter().map(|b| (b.base_avatar_id, b)).collect();
@@ -160,14 +174,30 @@ impl InventoryDecoder {
                             eidolon: path.rank as u8,
                         });
                     }
+                    self.revision += 1;
                     characters.sort_by_key(|c| c.character_id);
-                    self.characters = Some(characters);
+                    if !has_get_all {
+                        let roster = self.characters.get_or_insert_with(Vec::new);
+                        for character in characters {
+                            if let Some(old) = roster
+                                .iter_mut()
+                                .find(|old| old.character_id == character.character_id)
+                            {
+                                *old = character;
+                            } else {
+                                roster.push(character);
+                            }
+                        }
+                        roster.sort_by_key(|c| c.character_id);
+                    } else {
+                        self.characters = Some(characters);
+                    }
                 }
             }
             // Require both inventory record families in the same container.
             // Missing collections are never reported as captured empty data.
-            if (self.targets.light_cones && self.light_cones.is_none())
-                || (self.targets.relics && self.relics.is_none())
+            if (self.targets.light_cones && (self.light_cones.is_none() || self.continuous))
+                || (self.targets.relics && (self.relics.is_none() || self.continuous))
             {
                 let cones = unique_group(&groups, |bytes| {
                     let value = Equipment::parse_from_bytes(bytes).ok()?;
@@ -187,10 +217,31 @@ impl InventoryDecoder {
                         && value.sub_affix_list.len() <= 4)
                         .then_some(value)
                 });
-                if let (Some((cone_tag, cones)), Some((relic_tag, relics))) = (cones, relics) {
-                    if cone_tag == relic_tag {
+                let full = cones.is_some() && relics.is_some();
+                let update = self.continuous
+                    && self.light_cones.is_some()
+                    && self.relics.is_some()
+                    && (cones.is_some() || relics.is_some());
+                if full || update {
+                    if matches!((&cones, &relics), (Some((a, _)), Some((b, _))) if a == b) {
                         continue;
                     }
+                    let mut incoming = BTreeSet::new();
+                    for cone in cones.into_iter().flat_map(|(_, values)| values) {
+                        if !incoming.insert(cone.unique_id) {
+                            return Err(invalid("duplicate light cone instance"));
+                        }
+                        self.cones_by_id.insert(cone.unique_id, cone);
+                    }
+                    incoming.clear();
+                    for relic in relics.into_iter().flat_map(|(_, values)| values) {
+                        if !incoming.insert(relic.unique_id) {
+                            return Err(invalid("duplicate relic instance"));
+                        }
+                        self.relics_by_id.insert(relic.unique_id, relic);
+                    }
+                    let cones: Vec<_> = self.cones_by_id.values().cloned().collect();
+                    let relics: Vec<_> = self.relics_by_id.values().cloned().collect();
                     let mut ids = BTreeSet::new();
                     let mut normalized_cones = Vec::new();
                     for cone in cones.into_iter().filter(|_| self.targets.light_cones) {
@@ -214,6 +265,22 @@ impl InventoryDecoder {
                         }
                         normalized_relics.push(self.relic(relic)?);
                     }
+                    self.export_details.instance_ids =
+                        Some(crate::scanner_export::CaptureInstanceIds {
+                            light_cones: self
+                                .cones_by_id
+                                .keys()
+                                .copied()
+                                .filter(|_| self.targets.light_cones)
+                                .collect(),
+                            relics: self
+                                .relics_by_id
+                                .keys()
+                                .copied()
+                                .filter(|_| self.targets.relics)
+                                .collect(),
+                        });
+                    self.revision += 1;
                     if self.targets.light_cones {
                         self.light_cones = Some(normalized_cones);
                     }

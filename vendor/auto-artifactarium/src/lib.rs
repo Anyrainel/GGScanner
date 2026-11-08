@@ -212,6 +212,9 @@ pub struct GameSniffer {
     rsa_keys: Vec<RsaPrivateKey>,
     sent_time: Option<u64>,
     possible_seeds: Vec<u64>,
+    // Initial late-start capture remains allowed. After an explicit disconnect,
+    // only a new handshake request can authorize another KCP stream.
+    awaiting_handshake: bool,
 }
 
 impl GameSniffer {
@@ -252,6 +255,17 @@ impl GameSniffer {
         !self.possible_seeds.is_empty()
     }
 
+    fn reset_connection_state(&mut self, awaiting_handshake: bool) {
+        self.recv_kcp = None;
+        self.sent_kcp = None;
+        self.client_seed = None;
+        self.key = None;
+        self.possible_seeds.clear();
+        self.sent_time = None;
+        self.last_error = None;
+        self.awaiting_handshake = awaiting_handshake;
+    }
+
     #[instrument(skip_all, fields(len = bytes.len()))]
     pub fn receive_packet(&mut self, bytes: Vec<u8>) -> Option<GamePacket> {
         let packet = match parse_connection_packet(&PORTS, bytes) {
@@ -264,21 +278,22 @@ impl GameSniffer {
         match packet {
             ConnectionPacket::HandshakeRequested => {
                 info!("handshake requested, resetting state");
-                self.recv_kcp = None;
-                self.sent_kcp = None;
-                self.key = None;
-                self.possible_seeds.clear();
-                self.sent_time = None;
+                self.reset_connection_state(false);
                 Some(GamePacket::Connection(packet))
             },
-            ConnectionPacket::HandshakeEstablished | ConnectionPacket::Disconnected => {
-                if matches!(packet, ConnectionPacket::Disconnected) {
-                    self.last_error = Some("game connection closed; capture a new login".into());
-                }
+            ConnectionPacket::Disconnected => {
+                self.reset_connection_state(true);
+                self.last_error = Some("game connection closed; capture a new login".into());
                 Some(GamePacket::Connection(packet))
             },
+            ConnectionPacket::HandshakeEstablished => Some(GamePacket::Connection(packet)),
 
             ConnectionPacket::SegmentData(direction, kcp_seg) => {
+                if self.awaiting_handshake {
+                    self.last_error =
+                        Some("game connection closed; waiting for a new login handshake".into());
+                    return None;
+                }
                 let commands = self.receive_kcp_segment(direction, &kcp_seg);
                 match commands {
                     Some(commands) => Some(GamePacket::Commands(commands)),
@@ -537,9 +552,112 @@ mod capture_state_tests {
         );
     }
 
+    fn udp_frame(payload: &[u8], incoming: bool) -> Vec<u8> {
+        let (src, dst) = if incoming {
+            (22101, 50000)
+        } else {
+            (50000, 22101)
+        };
+        let builder = etherparse::PacketBuilder::ethernet2([0; 6], [0; 6])
+            .ipv4([127, 0, 0, 1], [127, 0, 0, 1], 64)
+            .udp(src, dst);
+        let mut packet = Vec::new();
+        builder.write(&mut packet, payload).unwrap();
+        packet
+    }
+
+    fn encrypted_frame(
+        conv: u32,
+        sequence: u32,
+        body: &[u8],
+        key: &[u8],
+        incoming: bool,
+    ) -> Vec<u8> {
+        let mut command = dispatch_command(body);
+        decrypt_command(key, &mut command);
+        let mut segment = conv.to_le_bytes().to_vec();
+        segment.extend_from_slice(&[0; 4]); // Game-specific KCP token.
+        segment.extend_from_slice(&[81, 0, 0, 4]); // PUSH, no fragments, window 1024.
+        segment.extend_from_slice(&0u32.to_le_bytes()); // Timestamp.
+        segment.extend_from_slice(&sequence.to_le_bytes());
+        segment.extend_from_slice(&0u32.to_le_bytes()); // Unacknowledged sequence.
+        segment.extend_from_slice(&(command.len() as u32).to_le_bytes());
+        segment.extend_from_slice(&[0; 4]); // Game-specific KCP header extension.
+        segment.extend_from_slice(&command);
+        udp_frame(&segment, incoming)
+    }
+
+    #[test]
+    fn disconnect_drops_old_encrypted_stream_until_a_new_handshake_request() {
+        let key = vec![0xA5; 4096];
+        let mut sniffer =
+            GameSniffer::new().set_initial_keys(HashMap::from([(0xA5A5, key.clone())]));
+        // Initial late-start capture remains supported without a control frame.
+        for incoming in [true, false] {
+            let Some(GamePacket::Commands(commands)) =
+                sniffer.receive_packet(encrypted_frame(11, 0, &[8, 42], &key, incoming))
+            else {
+                panic!("initial synthetic stream should decode");
+            };
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].proto_data, [8, 42]);
+        }
+        sniffer.possible_seeds = vec![123456789];
+        sniffer.sent_time = Some(1700000000000);
+        sniffer.client_seed = Some(987654321);
+        assert!(matches!(
+            sniffer.receive_packet(udp_frame(&404u32.to_be_bytes(), true)),
+            Some(GamePacket::Connection(ConnectionPacket::Disconnected))
+        ));
+        assert!(sniffer.recv_kcp.is_none());
+        assert!(sniffer.sent_kcp.is_none());
+        assert!(sniffer.key.is_none());
+        assert!(sniffer.client_seed.is_none());
+        assert!(sniffer.sent_time.is_none());
+        assert!(!sniffer.key_exchange_captured());
+
+        for incoming in [true, false] {
+            assert!(
+                sniffer
+                    .receive_packet(encrypted_frame(11, 1, &[8, 43], &key, incoming),)
+                    .is_none()
+            );
+        }
+        assert!(sniffer.recv_kcp.is_none());
+        assert!(sniffer.sent_kcp.is_none());
+        assert!(sniffer.key.is_none());
+        // The current parser labels unknown short control codes as established;
+        // those alone cannot establish a fresh post-disconnect login.
+        assert!(matches!(
+            sniffer.receive_packet(udp_frame(&0x145u32.to_be_bytes(), true)),
+            Some(GamePacket::Connection(
+                ConnectionPacket::HandshakeEstablished
+            ))
+        ));
+        assert!(
+            sniffer
+                .receive_packet(encrypted_frame(11, 0, &[8, 43], &key, true),)
+                .is_none()
+        );
+
+        assert!(matches!(
+            sniffer.receive_packet(udp_frame(&0xFFu32.to_be_bytes(), false)),
+            Some(GamePacket::Connection(ConnectionPacket::HandshakeRequested))
+        ));
+        assert!(sniffer.last_error().is_none());
+        let Some(GamePacket::Commands(commands)) =
+            sniffer.receive_packet(encrypted_frame(22, 0, &[8, 44], &key, true))
+        else {
+            panic!("new login stream should decode after handshake");
+        };
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].proto_data, [8, 44]);
+    }
+
     #[test]
     fn new_handshake_clears_old_token_candidates() {
         let mut sniffer = sniffer_with_token();
+        sniffer.client_seed = Some(987654321);
         let builder = etherparse::PacketBuilder::ethernet2([0; 6], [0; 6])
             .ipv4([127, 0, 0, 1], [127, 0, 0, 1], 64)
             .udp(50000, 22101);
@@ -551,6 +669,7 @@ mod capture_state_tests {
         ));
         assert!(!sniffer.key_exchange_captured());
         assert!(sniffer.sent_time.is_none());
+        assert!(sniffer.client_seed.is_none());
     }
 }
 

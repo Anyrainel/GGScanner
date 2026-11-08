@@ -85,12 +85,27 @@ pub struct GoodSubStat {
     pub rolls: Vec<f64>,
 }
 
+/// Optional GGScanner account identity extension to GOOD exports.
+///
+/// Only populate these fields from a validated source for the same account as
+/// the exported inventory. Neither current Genshin OCR nor packet capture
+/// establishes this identity; both leave export metadata absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoodMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+
 /// GOOD v3 full export
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoodExport {
     pub format: String,
     pub version: u32,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<GoodMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub characters: Option<Vec<GoodCharacter>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +130,7 @@ impl GoodExport {
             format: "GOOD".to_string(),
             version: 3,
             source: "yas-GOODScanner".to_string(),
+            metadata: None,
             characters,
             weapons,
             artifacts,
@@ -125,6 +141,74 @@ impl GoodExport {
     pub fn with_achievements(mut self, achievements: Option<Vec<u32>>) -> Self {
         self.achievements = achievements;
         self
+    }
+}
+
+#[cfg(test)]
+mod export_metadata_tests {
+    use super::*;
+    use crate::continuous::ContinuousCapture;
+    use serde_json::json;
+
+    #[test]
+    fn normal_exports_and_legacy_roundtrips_omit_unavailable_identity() {
+        let export = GoodExport::new(Some(Vec::new()), Some(Vec::new()), Some(Vec::new()));
+        assert!(export.metadata.is_none());
+        let legacy = json!({
+            "format": "GOOD", "version": 3, "source": "yas-GOODScanner",
+            "characters": [], "weapons": [], "artifacts": []
+        });
+        assert_eq!(serde_json::to_value(&export).unwrap(), legacy);
+        let decoded: GoodExport = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(decoded.metadata.is_none());
+        assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    }
+
+    #[test]
+    fn validated_identity_metadata_roundtrips_without_inventing_optional_fields() {
+        let mut export = GoodExport::new(None, None, None);
+        export.metadata = Some(GoodMetadata {
+            uid: Some("123456789".into()),
+            nickname: Some("Test Traveler".into()),
+        });
+        let serialized = serde_json::to_value(&export).unwrap();
+        assert_eq!(
+            serialized["metadata"],
+            json!({
+                "uid": "123456789", "nickname": "Test Traveler"
+            })
+        );
+        let decoded: GoodExport = serde_json::from_value(serialized).unwrap();
+        assert_eq!(decoded.metadata, export.metadata);
+
+        export.metadata = Some(GoodMetadata {
+            uid: Some("123456789".into()),
+            nickname: None,
+        });
+        assert_eq!(
+            serde_json::to_value(export).unwrap()["metadata"],
+            json!({"uid": "123456789"})
+        );
+    }
+
+    #[test]
+    fn continuous_snapshots_preserve_export_identity_without_adding_it() {
+        let capture = ContinuousCapture::default();
+        let mut export = GoodExport::new(None, None, Some(Vec::new()));
+        capture.publish(serde_json::to_value(&export).unwrap());
+        let (status, response) = ContinuousCapture::response(Some(&capture));
+        assert_eq!(status, 200);
+        assert!(response["data"].get("metadata").is_none());
+
+        export.metadata = Some(GoodMetadata {
+            uid: Some("123456789".into()),
+            nickname: Some("Test Traveler".into()),
+        });
+        capture.publish(serde_json::to_value(&export).unwrap());
+        let (status, response) = ContinuousCapture::response(Some(&capture));
+        assert_eq!(status, 200);
+        let decoded: GoodExport = serde_json::from_value(response["data"].clone()).unwrap();
+        assert_eq!(decoded.metadata, export.metadata);
     }
 }
 
