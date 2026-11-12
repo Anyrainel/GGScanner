@@ -10,8 +10,11 @@ dump files are left in place.
   decoding, including frames that fail parsing, reassembly, or decryption. The
   file uses standard PCAP format and can be opened in Wireshark or replayed by
   passing its frame records to `GameSniffer::receive_packet` in order.
-- `NNNNNN_cmdID.bin` preserves decoded command data in the previous dump format
-  (PacketHead plus protobuf body). Command numbering starts at zero per session.
+- `NNNNNN_cmdID.bin` preserves the complete decrypted game command: magic,
+  command ID, header/body lengths, PacketHead, protobuf body and trailing magic.
+  The lengths retain the original header/body boundary for reliable replay.
+  Older flat dumps contain only concatenated PacketHead and body; do not treat
+  those files as framed commands. Command numbering starts at zero per session.
 - `diagnostics.jsonl` records state after each raw frame and at capture end.
   `rawPacket` identifies the 1-based PCAP record, and `commands` gives the number
   of decoded command files so far. Rejected command counts, key exchange state,

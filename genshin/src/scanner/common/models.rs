@@ -88,8 +88,8 @@ pub struct GoodSubStat {
 /// Optional GGScanner account identity extension to GOOD exports.
 ///
 /// Only populate these fields from a validated source for the same account as
-/// the exported inventory. Neither current Genshin OCR nor packet capture
-/// establishes this identity; both leave export metadata absent.
+/// the exported inventory. Packet capture verifies the login UID; OCR exports
+/// leave identity absent. Nickname is optional and currently not populated.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoodMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]

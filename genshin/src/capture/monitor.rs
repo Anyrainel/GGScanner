@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use auto_artifactarium::r#gen::protos::{AvatarInfo, Item, Unk};
-use auto_artifactarium::{GamePacket, GameSniffer};
+use auto_artifactarium::{GameCommand, GamePacket, GameSniffer, PacketDirection};
 use base64::prelude::*;
 use protobuf::Message;
 use protobuf::UnknownValueRef;
@@ -361,6 +361,21 @@ impl CaptureMonitor {
                 .is_ok_and(|state| state.has_characters && state.has_items)
     }
 
+    fn reset_login(&mut self) {
+        self.player_data.begin_capture();
+        if let Some(latest) = &self.continuous {
+            latest.reset();
+        }
+        let mut state = self.state.lock().expect("capture state poisoned");
+        let listener_ready = state.listener_ready;
+        *state = CaptureState {
+            capturing: true,
+            listener_ready,
+            has_key_exchange: self.sniffer.key_exchange_captured(),
+            ..CaptureState::default()
+        };
+    }
+
     fn process_packet(&mut self, packet: Vec<u8>) {
         let decoded = self.sniffer.receive_packet(packet);
         if let Ok(mut state) = self.state.lock() {
@@ -373,29 +388,22 @@ impl CaptureMonitor {
             }
             state.has_key_exchange = captured;
         }
-        if self.continuous.is_some()
-            && matches!(
-                decoded,
-                Some(GamePacket::Connection(
-                    auto_artifactarium::ConnectionPacket::HandshakeRequested
-                        | auto_artifactarium::ConnectionPacket::Disconnected
-                ))
-            )
-        {
-            self.player_data.begin_capture();
-            self.continuous.as_ref().unwrap().reset();
-            let mut state = self.state.lock().expect("capture state poisoned");
-            let listener_ready = state.listener_ready;
-            *state = CaptureState {
-                capturing: true,
-                listener_ready,
-                ..CaptureState::default()
-            };
+        if matches!(
+            decoded,
+            Some(GamePacket::Connection(
+                auto_artifactarium::ConnectionPacket::HandshakeRequested
+                    | auto_artifactarium::ConnectionPacket::Disconnected { .. }
+            ))
+        ) {
+            self.reset_login();
         }
         let Some(GamePacket::Commands(commands)) = decoded else {
             return;
         };
+        self.process_commands(commands);
+    }
 
+    fn process_commands(&mut self, commands: Vec<GameCommand>) {
         // Heuristic matching: try parsing every command as item/avatar packets
         // regardless of command_id.  This survives command ID rotation across
         // game versions.
@@ -407,8 +415,29 @@ impl CaptureMonitor {
                 .command_count += 1;
             // Dump raw decrypted commands when enabled
             if let Some(dump) = &mut self.packet_dump {
-                let result = dump.write_command(command.command_id, &command.proto_data);
+                let result = dump.write_command(command.command_id, &command.to_bytes());
                 self.check_dump_write(result);
+            }
+
+            if command.direction != PacketDirection::Received {
+                continue;
+            }
+            if command.is_token_response {
+                // A token response is a login boundary even if its handshake
+                // control frame was missed, and even when reconnecting to the
+                // same UID. Never attach old inventory to a new identity.
+                self.reset_login();
+                self.player_data.set_uid(command.account_uid);
+                if command.account_uid.is_none() {
+                    log_warn!(
+                        "登录响应中的游戏 UID 无法验证，请更新扫描器后重新登录。",
+                        "The login response's game UID could not be verified. Update the scanner and log in again."
+                    );
+                    if let Some(latest) = &self.continuous {
+                        latest.fail("The Genshin login UID could not be verified. Update GGScanner and log in again.".into());
+                    }
+                }
+                continue;
             }
 
             if let Some(achievement_ids) = try_match_achievements(&command.proto_data) {
@@ -500,7 +529,7 @@ impl CaptureMonitor {
             .is_ok_and(|state| state.selected_complete(&self.targets));
         if let Some(latest) = self.continuous.as_ref().filter(|_| data_changed) {
             let state = self.state.lock().expect("capture state poisoned");
-            if state.has_characters && state.has_items {
+            if state.has_characters && state.has_items && self.player_data.uid().is_some() {
                 let settings = CaptureExportSettings {
                     include_achievements: state.has_achievements,
                     ..self.targets.clone()
@@ -1648,5 +1677,317 @@ mod tests {
                 "item data shouldn't produce avatars with valid props"
             );
         }
+    }
+
+    fn identity_test_monitor() -> (CaptureMonitor, crate::continuous::ContinuousCapture) {
+        use crate::game_data::types::{Artifact, ArtifactSlot, DataCache, Property, Weapon};
+
+        let mut cache: DataCache =
+            serde_json::from_str(r#"{"version":1,"git_hash":"synthetic-login"}"#).unwrap();
+        cache.property_map.insert(1, Property::Hp);
+        cache.artifact_map.insert(
+            101,
+            Artifact {
+                set: "Gladiator's Finale".into(),
+                slot: ArtifactSlot::Flower,
+                rarity: 5,
+            },
+        );
+        cache.weapon_map.insert(
+            201,
+            Weapon {
+                name: "Test Sword".into(),
+                rarity: 5,
+            },
+        );
+        for index in 1..=4 {
+            cache
+                .character_map
+                .insert(10_000_000 + index, format!("Test Character {index}"));
+        }
+        let mut monitor = test_monitor(CaptureState {
+            capturing: true,
+            ..CaptureState::default()
+        });
+        monitor.player_data = PlayerData::new(cache);
+        monitor.sniffer = GameSniffer::new().set_initial_keys(HashMap::from([(0, vec![0; 4096])]));
+        let latest = crate::continuous::ContinuousCapture::default();
+        monitor.continuous = Some(latest.clone());
+        (monitor, latest)
+    }
+
+    fn identity_udp_frame(payload: &[u8], incoming: bool) -> Vec<u8> {
+        // Complete Ethernet/IPv4/UDP framing, consumed by the production parser.
+        let mut frame = vec![0; 14 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&((20 + 8 + payload.len()) as u16).to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 17;
+        frame[26..30].copy_from_slice(&[127, 0, 0, 1]);
+        frame[30..34].copy_from_slice(&[127, 0, 0, 1]);
+        let (source, destination): (u16, u16) = if incoming {
+            (22101, 50000)
+        } else {
+            (50000, 22101)
+        };
+        frame[34..36].copy_from_slice(&source.to_be_bytes());
+        frame[36..38].copy_from_slice(&destination.to_be_bytes());
+        frame[38..40].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn identity_control_frame(code: u32, conv: Option<u32>, incoming: bool) -> Vec<u8> {
+        let mut payload = code.to_be_bytes().to_vec();
+        if let Some(conv) = conv {
+            payload.extend_from_slice(&conv.to_be_bytes());
+        }
+        identity_udp_frame(&payload, incoming)
+    }
+
+    fn identity_command_frame(body: &[u8]) -> Vec<u8> {
+        let mut command = 0x4567u16.to_be_bytes().to_vec();
+        command.extend_from_slice(&65500u16.to_be_bytes()); // Rotating ID is irrelevant.
+        command.extend_from_slice(&0u16.to_be_bytes());
+        command.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        command.extend_from_slice(body);
+        command.extend_from_slice(&0x89ABu16.to_be_bytes());
+        command
+    }
+
+    fn identity_kcp_frame(conv: u32, sequence: u32, command: &[u8], incoming: bool) -> Vec<u8> {
+        // A zero dispatch key leaves the fictional command bytes unchanged.
+        let mut segment = conv.to_le_bytes().to_vec();
+        segment.extend_from_slice(&[0; 4]); // Game KCP token.
+        segment.extend_from_slice(&[81, 0, 0, 4]); // PUSH, no fragments, window 1024.
+        segment.extend_from_slice(&0u32.to_le_bytes());
+        segment.extend_from_slice(&sequence.to_le_bytes());
+        segment.extend_from_slice(&0u32.to_le_bytes());
+        segment.extend_from_slice(&(command.len() as u32).to_le_bytes());
+        segment.extend_from_slice(&[0; 4]); // Game KCP header extension.
+        segment.extend_from_slice(command);
+        identity_udp_frame(&segment, incoming)
+    }
+
+    fn identity_token(uid: u32) -> Vec<u8> {
+        let mut command = GameCommand::try_new(
+            include_bytes!("testdata/token7_2.bin").to_vec(),
+            PacketDirection::Received,
+        )
+        .unwrap();
+        let mut body = Unk::parse_from_bytes(&command.proto_data).unwrap();
+        body.mut_unknown_fields().remove(9);
+        body.mut_unknown_fields().add_varint(9, u64::from(uid));
+        command.proto_data = body.write_to_bytes().unwrap();
+        command.to_bytes()
+    }
+
+    fn identity_inventory(guid_offset: u64) -> (Vec<u8>, Vec<u8>) {
+        use auto_artifactarium::r#gen::protos::{Equip, PropValue, Reliquary, Weapon};
+
+        let mut items = Unk::new();
+        for index in 1..=6 {
+            let mut weapon = Weapon::new();
+            weapon.level = 20;
+            let mut equip = Equip::new();
+            equip.set_weapon(weapon);
+            let mut item = Item::new();
+            item.item_id = 201;
+            item.guid = guid_offset + index;
+            item.set_equip(equip);
+            items
+                .mut_unknown_fields()
+                .add_length_delimited(3, item.write_to_bytes().unwrap());
+
+            let mut artifact = Reliquary::new();
+            artifact.level = 1;
+            artifact.main_prop_id = 1;
+            let mut equip = Equip::new();
+            equip.set_reliquary(artifact);
+            let mut item = Item::new();
+            item.item_id = 101;
+            item.guid = guid_offset + 10 + index;
+            item.set_equip(equip);
+            items
+                .mut_unknown_fields()
+                .add_length_delimited(3, item.write_to_bytes().unwrap());
+        }
+        let mut avatars = Unk::new();
+        for index in 1..=4 {
+            let mut avatar = AvatarInfo::new();
+            avatar.avatar_id = 10_000_000 + index;
+            avatar.guid = guid_offset + 100 + u64::from(index);
+            avatar.avatar_type = 1;
+            let mut level = PropValue::new();
+            level.val = 20;
+            avatar.prop_map.insert(4001, level);
+            avatar.prop_map.insert(1002, PropValue::new());
+            avatars
+                .mut_unknown_fields()
+                .add_length_delimited(10, avatar.write_to_bytes().unwrap());
+        }
+        (
+            identity_command_frame(&items.write_to_bytes().unwrap()),
+            identity_command_frame(&avatars.write_to_bytes().unwrap()),
+        )
+    }
+
+    fn identity_begin_login(monitor: &mut CaptureMonitor, conv: u32, uid: u32) {
+        monitor.process_packet(identity_control_frame(0xff, None, false));
+        monitor.process_packet(identity_control_frame(0x145, Some(conv), true));
+        monitor.process_packet(identity_kcp_frame(conv, 0, &identity_token(uid), true));
+    }
+
+    fn identity_publish_inventory(monitor: &mut CaptureMonitor, conv: u32, guid_offset: u64) {
+        let (items, avatars) = identity_inventory(guid_offset);
+        monitor.process_packet(identity_kcp_frame(conv, 1, &items, true));
+        monitor.process_packet(identity_kcp_frame(conv, 2, &avatars, true));
+    }
+
+    #[test]
+    fn continuous_uid_comes_from_incoming_login_before_inventory_is_published() {
+        let (mut monitor, latest) = identity_test_monitor();
+        let (items, avatars) = identity_inventory(1000);
+        monitor.process_packet(identity_kcp_frame(11, 0, &items, true));
+        monitor.process_packet(identity_kcp_frame(11, 1, &avatars, true));
+        assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+
+        // Outgoing bytes with the exact token shape cannot establish account identity.
+        monitor.process_packet(identity_kcp_frame(
+            11,
+            0,
+            &identity_token(800_000_002),
+            false,
+        ));
+        assert_eq!(monitor.player_data.uid(), None);
+        assert!(!monitor.sniffer.key_exchange_captured());
+        monitor.process_packet(identity_kcp_frame(
+            11,
+            2,
+            &identity_token(800_000_001),
+            true,
+        ));
+        assert_eq!(monitor.player_data.uid(), Some(800_000_001));
+        assert!(monitor.sniffer.key_exchange_captured());
+        assert_eq!(monitor.player_data.character_count(), 0);
+        assert_eq!(monitor.player_data.weapon_count(), 0);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+
+        monitor.process_packet(identity_kcp_frame(11, 3, &items, true));
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+        monitor.process_packet(identity_kcp_frame(11, 4, &avatars, true));
+        let (status, snapshot) = crate::continuous::ContinuousCapture::response(Some(&latest));
+        assert_eq!(status, 200);
+        assert_eq!(snapshot["data"]["metadata"]["uid"], "800000001");
+        assert_eq!(snapshot["data"]["characters"].as_array().unwrap().len(), 4);
+        assert_eq!(snapshot["data"]["weapons"].as_array().unwrap().len(), 6);
+        assert_eq!(snapshot["data"]["artifacts"].as_array().unwrap().len(), 6);
+        let normal = monitor
+            .player_data
+            .export(&CaptureExportSettings::default())
+            .unwrap();
+        assert_eq!(normal.metadata.unwrap().uid.as_deref(), Some("800000001"));
+    }
+
+    #[test]
+    fn continuous_account_switches_and_same_uid_reconnects_reset_identity_and_inventory() {
+        let (mut monitor, latest) = identity_test_monitor();
+        identity_begin_login(&mut monitor, 11, 800_000_001);
+        identity_publish_inventory(&mut monitor, 11, 1000);
+        let first = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
+        assert_eq!(first["data"]["metadata"]["uid"], "800000001");
+
+        monitor.process_packet(identity_control_frame(0xff, None, false));
+        assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(monitor.player_data.character_count(), 0);
+        assert_eq!(monitor.player_data.artifact_count(), 0);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+        // Delayed traffic from the old conversation cannot identify the new login.
+        monitor.process_packet(identity_kcp_frame(
+            11,
+            3,
+            &identity_token(800_000_003),
+            true,
+        ));
+        assert_eq!(monitor.player_data.uid(), None);
+        monitor.process_packet(identity_control_frame(0x145, Some(22), true));
+        monitor.process_packet(identity_kcp_frame(
+            22,
+            0,
+            &identity_token(800_000_002),
+            true,
+        ));
+        let (old_items, _) = identity_inventory(1000);
+        monitor.process_packet(identity_kcp_frame(11, 4, &old_items, true));
+        assert_eq!(monitor.player_data.uid(), Some(800_000_002));
+        assert_eq!(monitor.player_data.weapon_count(), 0);
+        identity_publish_inventory(&mut monitor, 22, 2000);
+        let (status, second) = crate::continuous::ContinuousCapture::response(Some(&latest));
+        assert_eq!(status, 200);
+        assert_ne!(first["sessionId"], second["sessionId"]);
+        assert_eq!(second["data"]["metadata"]["uid"], "800000002");
+        assert_eq!(second["data"]["characters"].as_array().unwrap().len(), 4);
+        assert_eq!(second["data"]["weapons"].as_array().unwrap().len(), 6);
+        assert_eq!(second["data"]["artifacts"].as_array().unwrap().len(), 6);
+        monitor.process_packet(identity_control_frame(404, Some(11), true));
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).1,
+            second
+        );
+
+        identity_begin_login(&mut monitor, 33, 800_000_002);
+        assert_eq!(monitor.player_data.uid(), Some(800_000_002));
+        assert_eq!(monitor.player_data.weapon_count(), 0);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+        identity_publish_inventory(&mut monitor, 33, 3000);
+        let reconnected = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
+        assert_ne!(second["sessionId"], reconnected["sessionId"]);
+        assert_eq!(reconnected["revision"], 1);
+        assert_eq!(reconnected["data"]["metadata"]["uid"], "800000002");
+        assert_eq!(reconnected["data"]["weapons"].as_array().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn unverified_login_cannot_publish_anonymous_inventory_or_reuse_previous_uid() {
+        let (mut monitor, latest) = identity_test_monitor();
+        identity_begin_login(&mut monitor, 11, 800_000_001);
+        identity_publish_inventory(&mut monitor, 11, 1000);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            200
+        );
+
+        identity_begin_login(&mut monitor, 22, 0);
+        assert_eq!(monitor.player_data.uid(), None);
+        identity_publish_inventory(&mut monitor, 22, 2000);
+        let (status, body) = crate::continuous::ContinuousCapture::response(Some(&latest));
+        assert_eq!(status, 503);
+        assert_eq!(body["error"], "continuous_capture_failed");
+        assert!(body.get("data").is_none());
+        assert_eq!(
+            monitor
+                .player_data
+                .export(&CaptureExportSettings::default())
+                .unwrap()
+                .metadata,
+            None
+        );
     }
 }

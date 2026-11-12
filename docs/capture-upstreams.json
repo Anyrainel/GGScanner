@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewed_date": "2026-11-08",
+  "reviewed_date": "2026-11-12",
   "sources": [
     {
       "repository": "konkers/auto-artifactarium",
@@ -43,6 +43,13 @@
         "src/network/command/proto/PlayerLoginScRsp.rs": "bda036d50b453d50363555936040df88d01d9bd1",
         "src/network/command/proto/PlayerBasicInfo.rs": "a2cad16d32eb5a104cf59d877ed0af34c1c08e99"
       }
+    },
+    {
+      "repository": "MeChen618/AstaPS",
+      "reviewed_revision": "a49f51aa6f2787ffbc25cee46801b70dee860d23",
+      "files": {
+        "src/main/proto/GetPlayerTokenRsp.proto": "c9812bd173a321f16fab8cb744f8c03864c67348"
+      }
     }
   ],
   "local_files": {
@@ -50,11 +57,11 @@
     "vendor/auto-artifactarium/protos/protos.proto": "0f0744decd88ad6ff6219e11f351acbe777cd4584bc7423460b2c1af633575fa",
     "vendor/auto-artifactarium/keys/private_key_4.pem": "c43fafade9dbc63440339fab24fa19d5ae78bc69e60d66ee956d951d6ff6392f",
     "vendor/auto-artifactarium/keys/private_key_5.pem": "6a3fbd53387f9d13230f8558e40df18ad3a8fc11fc23da83a202eedc3bd70ce3",
-    "vendor/auto-artifactarium/src/connection.rs": "5eeb45e69740359e8bc19096b578e805a94a045a63d4628e7e809245175a40f8",
+    "vendor/auto-artifactarium/src/connection.rs": "15e6759fdfaaa6ec78fe8d7fd639a63a0d5a8fcb4539f5eed481e12b8021eb4d",
     "vendor/auto-artifactarium/src/crypto.rs": "ce1cd99455909cad1817f3dd79f8d9e0c4cc636488df625e8649c0adfcc09fad",
     "vendor/auto-artifactarium/src/cs_rand.rs": "df9fba860112fa059c0b1219518faffc28b5a464eeb1dfbde03aaf1665e310d6",
-    "vendor/auto-artifactarium/src/kcp.rs": "cb76350fc16f9f5ca2dfa0e0dc0b6d67b35ea2ad1e3aa67a9f1ebe4f0b80b013",
-    "vendor/auto-artifactarium/src/lib.rs": "c7fe62ea153f782a2a69c16aabe2a1bc773161772988f2a117bb3b029ae7708e",
+    "vendor/auto-artifactarium/src/kcp.rs": "f7e2a8a598d4d19ce8d8fd6654aeb43d8b84804e21fe4c2ea30b6cf1a32bd070",
+    "vendor/auto-artifactarium/src/lib.rs": "7777827b31e7ee818ad25c6a522b67a082a6823f20432e2a2872440524b4987e",
     "vendor/auto-artifactarium/src/unk_util.rs": "7ee2e69a385ef8212e69146329e16906860874036af7c47055434696f85d8019",
     "experimental/hsr/Cargo.toml": "d3456acee5042afbd5a936ae5a37a27a98f1f9c79ae579a52e701eb641e6232c",
     "experimental/hsr/src/packet_capture/protocol.rs": "51247ed100bec8959cebe1cab0e0cf1c2793595bb6fdab44bb53d6329d258396",
@@ -71,6 +78,7 @@
     "experimental/hsr/src/packet_capture/proto/mod.rs": "2827f81f3a62bdbbc11f588185919dd811c0c73f7cd1d4cd248d19bf2eca6036",
     "experimental/hsr/src/packet_capture/proto/Relic.rs": "35c8e731606f1c609fa7d8a356fa9f5b1a4cad3efe81e12d195892cf0b667d0e",
     "experimental/hsr/src/packet_capture/proto/RelicAffix.rs": "51781661a10cd1e3267e5d3a2a5613f9e2feeffc799ae3fea70f19cac5984ebf",
-    "experimental/hsr/src/network/identity.rs": "c92a84d91c63ecab7f13af30a77f19b9e7b96cc4ae68d1d9eaf807416f94c9a2"
+    "experimental/hsr/src/network/identity.rs": "c92a84d91c63ecab7f13af30a77f19b9e7b96cc4ae68d1d9eaf807416f94c9a2",
+    "vendor/auto-artifactarium/src/identity.rs": "b66da037bc88be6e5a68af2ea0a30feb33eb885548b5d62f18ae1ffcffe7e3dd"
   }
 }

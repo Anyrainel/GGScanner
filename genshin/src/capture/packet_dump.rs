@@ -27,7 +27,7 @@ impl PacketDump {
         packets.flush()?;
         let diagnostics = BufWriter::new(create_file(&directory.join("diagnostics.jsonl"))?);
         fs::write(directory.join("README.txt"),
-            "Genshin capture debug session\npackets.pcap: all raw pktmon Ethernet frames in arrival order, saved before decoding (including failed packets).\nNNNNNN_cmdID.bin: decoded command data, including its PacketHead, as in older dumps.\ndiagnostics.jsonl: state after each raw packet and at capture end; rawPacket is the 1-based PCAP record number, commands is the number of decoded command files.\n")?;
+            "Genshin capture debug session\npackets.pcap: all raw pktmon Ethernet frames in arrival order, saved before decoding (including failed packets).\nNNNNNN_cmdID.bin: complete decrypted game command with magic, command ID, header/body lengths, PacketHead, protobuf body and trailing magic. Older flat dumps omitted this framing.\ndiagnostics.jsonl: state after each raw packet and at capture end; rawPacket is the 1-based PCAP record number, commands is the number of decoded command files.\n")?;
         Ok(Self {
             directory,
             packets,

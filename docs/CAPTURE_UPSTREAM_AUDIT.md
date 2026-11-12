@@ -104,7 +104,46 @@ remain unchanged. Its synthetic encrypted-packet regression and full library
 tests pass. These intentional wrapper changes and the new HSR identity module
 have reviewed local fingerprints in `capture-upstreams.json`.
 
-Genshin UID/nickname detection remains unverified for current official-server
-packets. Optional GOOD identity metadata is supported, but current capture does
-not invent identity. Websites use the user's selected-profile fallback when UID
-is absent. No fresh live-game capture is claimed by this validation.
+At the November 8 review, Genshin UID/nickname detection remained unverified for
+official-server packets. Optional GOOD identity metadata was supported, while
+unidentified captures used the website's selected-profile fallback. The
+completion below supersedes that UID limitation. Neither review claims a fresh
+live-game capture.
+
+## Genshin login identity completion — 2026-11-12
+
+Reviewed AstaPS
+[`a49f51aa6f2787ffbc25cee46801b70dee860d23`](https://github.com/MeChen618/AstaPS/blob/a49f51aa6f2787ffbc25cee46801b70dee860d23/src/main/proto/GetPlayerTokenRsp.proto).
+The current login response identifies the game UID at field 9, success return
+code at 14, key ID at 440 and RSA server seed at 477. A retained November 9
+official-server response matches these fields; field 477 decrypts to exactly
+eight bytes with the bundled key. The public game UID differs from the
+HoYoverse account identifier at field 5. Current retained PacketHead data has no
+user ID; the legacy bundled header's `user_id` field is not used for identity.
+The referenced login schema is now watched by the source drift checker.
+
+Production command parsing now separates header and body, reads seed timing
+only from the header and retains direction. The identity reader validates the
+specific reviewed RSA field, success, unique UID and supported key ID. The
+monitor clears identity and inventory together at login boundaries; snapshots
+require both verified UID and baseline inventory. Both KCP directions share one
+conversation and reject retired traffic, including stale disconnect controls.
+Same-account reconnects create a new snapshot session. Retired conversation-ID
+reuse requires a listener restart because fresh reuse cannot be distinguished
+from delayed controls with the validated handshake information.
+
+Synthetic fully framed login fixtures exercise production Ethernet/KCP/RSA
+decoding, nonempty GOOD exports, outgoing-token rejection, account switches,
+same-UID reconnects and invalid-identity withholding. A local-only replay also
+fed the retained official response through the production decoder and matched
+its game UID. The legacy dump retained header plus body without original
+lengths; this replay reconstructed the boundary from the independently parsed
+header. It verifies the real token body and RSA/UID decoder, and is not a fresh
+raw-network capture. New command dumps retain complete framing for later
+replays. Private login data remains outside source control.
+
+Validation passed 14 vendor decoder tests, 335 Genshin tests, 74 website scanner
+tests, 11 checker tests and the release executable build. Bundled keys and
+watched Genshin upstream sources match. The combined source checker separately
+flagged newer Reliquary (Star Rail) upstream changes; that unrelated review
+baseline was left unchanged.

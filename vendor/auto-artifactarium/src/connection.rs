@@ -13,19 +13,23 @@ pub fn parse_connection_packet(port_filter: &[u16], bytes: Vec<u8>) -> Option<Co
             return None;
         }
         let code = u32::from_be_bytes(payload[..4].try_into().unwrap());
+        let conv_id = payload
+            .get(4..8)
+            .map(|bytes| u32::from_be_bytes(bytes.try_into().unwrap()));
         match code {
-            0xFF => {
+            0xFF if direction == PacketDirection::Sent => {
                 info!("handshake requested");
                 Some(ConnectionPacket::HandshakeRequested)
             },
             404 => {
                 warn!("disconnected packet");
-                Some(ConnectionPacket::Disconnected)
+                Some(ConnectionPacket::Disconnected { conv_id })
             },
-            _ => {
+            0x145 if direction == PacketDirection::Received => {
                 trace!("handshake established");
-                Some(ConnectionPacket::HandshakeEstablished)
+                Some(ConnectionPacket::HandshakeEstablished { conv_id })
             },
+            _ => None,
         }
     } else {
         Some(ConnectionPacket::SegmentData(direction, payload))

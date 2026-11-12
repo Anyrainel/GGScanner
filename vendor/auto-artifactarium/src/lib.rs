@@ -27,7 +27,7 @@
 //! let mut sniffer = GameSniffer::new();
 //! for packet in packets {
 //!     match sniffer.receive_packet(packet) {
-//!         Some(GamePacket::Connection(ConnectionPacket::Disconnected)) => {
+//!         Some(GamePacket::Connection(ConnectionPacket::Disconnected { .. })) => {
 //!             println!("Disconnected!");
 //!             break;
 //!         }
@@ -42,7 +42,7 @@
 //! ```
 //!
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write;
 
@@ -76,6 +76,7 @@ pub mod r#gen;
 mod connection;
 mod crypto;
 mod cs_rand;
+mod identity;
 mod kcp;
 mod unk_util;
 
@@ -90,8 +91,8 @@ pub enum GamePacket {
 /// Packet for connection management
 pub enum ConnectionPacket {
     HandshakeRequested,
-    Disconnected,
-    HandshakeEstablished,
+    Disconnected { conv_id: Option<u32> },
+    HandshakeEstablished { conv_id: Option<u32> },
     SegmentData(PacketDirection, Vec<u8>),
 }
 
@@ -101,27 +102,35 @@ enum CommandId {
     PlayerStoreNotify = 8132,
 }
 
-/// Game command header.
+/// A framed game command with separate protobuf header and body.
 ///
-/// Contains the type of the command in `command_id`
-/// and the data encoded in protobuf in `proto_data`
+/// `header_data` contains PacketHead; `proto_data` contains only the command body.
+/// They must be decoded separately because protobuf field numbers overlap.
 ///
 /// ## Bit Layout
 /// | Bit indices     |  Type |  Name |
 /// | - | - | - |
 /// |   0..2      |  `u16`  |  Header (magic constant) |
 /// |   2..4      |  `u16`  |  command_id |
-/// |   4..6      |  `u16`  |  header_len (unsure) |
+/// |   4..6      |  `u16`  |  header_len |
 /// |   6..10     |  `u32`  |  data_len |
-/// |  10..10+data_len |  variable  |  proto_data |
-/// | data_len..data_len+2  |  `u16`  |  Tail (magic constant) |
+/// |  10..10+header_len |  variable  |  header_data |
+/// |  10+header_len..10+header_len+data_len |  variable  |  proto_data |
+/// | final 2 bytes  |  `u16`  |  Tail (magic constant) |
 #[derive(Clone)]
 pub struct GameCommand {
     pub command_id: u16,
+    pub direction: PacketDirection,
+    /// An incoming dispatch response whose encrypted session seed was verified.
+    /// Never inferred from a command ID or from unrecognized protobuf fields.
+    pub is_token_response: bool,
+    /// Public game UID validated against this command's supported login layout.
+    pub account_uid: Option<u32>,
     #[allow(unused)]
     pub header_len: u16,
     #[allow(unused)]
     pub data_len: u32,
+    pub header_data: Vec<u8>,
     pub proto_data: Vec<u8>,
 }
 
@@ -130,7 +139,7 @@ impl GameCommand {
     const TAIL_LEN: usize = 2;
 
     #[instrument(skip(bytes), fields(len = bytes.len()))]
-    pub fn try_new(bytes: Vec<u8>) -> Option<Self> {
+    pub fn try_new(bytes: Vec<u8>, direction: PacketDirection) -> Option<Self> {
         let header_overhead = Self::HEADER_LEN + Self::TAIL_LEN;
         if bytes.len() < header_overhead {
             warn!(len = bytes.len(), "game command header incomplete");
@@ -151,19 +160,44 @@ impl GameCommand {
         let header_len = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
         let data_len = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
 
-        let end = 10usize
-            .checked_add(header_len as usize)?
-            .checked_add(data_len as usize)?;
+        let body_start = Self::HEADER_LEN.checked_add(header_len as usize)?;
+        let end = body_start.checked_add(data_len as usize)?;
         if end != bytes.len() - Self::TAIL_LEN {
             return None;
         }
-        let data = bytes[10..end].to_vec();
         Some(GameCommand {
             command_id,
+            direction,
+            is_token_response: false,
+            account_uid: None,
             header_len,
             data_len,
-            proto_data: data,
+            header_data: bytes[Self::HEADER_LEN..body_start].to_vec(),
+            proto_data: bytes[body_start..end].to_vec(),
         })
+    }
+
+    pub fn parse_header<T: protobuf::Message>(&self) -> protobuf::Result<T> {
+        T::parse_from_bytes(&self.header_data)
+    }
+
+    /// Reconstruct the complete decrypted frame, retaining the header boundary.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let header_len = u16::try_from(self.header_data.len())
+            .expect("parsed command header fits its frame length");
+        let body_len = u32::try_from(self.proto_data.len())
+            .expect("parsed command body fits its frame length");
+        let mut bytes = Vec::with_capacity(
+            Self::HEADER_LEN + self.header_data.len() + self.proto_data.len() + Self::TAIL_LEN,
+        );
+        bytes.extend_from_slice(&0x4567u16.to_be_bytes());
+        bytes.extend_from_slice(&self.command_id.to_be_bytes());
+        bytes.extend_from_slice(&header_len.to_be_bytes());
+        bytes.extend_from_slice(&body_len.to_be_bytes());
+        bytes.extend_from_slice(&self.header_data);
+        bytes.extend_from_slice(&self.proto_data);
+        bytes.extend_from_slice(&0x89ABu16.to_be_bytes());
+        bytes
     }
 
     pub fn parse_proto<T: protobuf::Message>(&self) -> protobuf::Result<T> {
@@ -183,6 +217,8 @@ impl fmt::Debug for GameCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GameCommand")
             .field("command_id", &self.command_id)
+            .field("direction", &self.direction)
+            .field("is_token_response", &self.is_token_response)
             .field("header_len", &self.header_len)
             .field("data_len", &self.data_len)
             .finish()
@@ -212,6 +248,8 @@ pub struct GameSniffer {
     rsa_keys: Vec<RsaPrivateKey>,
     sent_time: Option<u64>,
     possible_seeds: Vec<u64>,
+    active_conv: Option<u32>,
+    retired_convs: HashSet<u32>,
     // Initial late-start capture remains allowed. After an explicit disconnect,
     // only a new handshake request can authorize another KCP stream.
     awaiting_handshake: bool,
@@ -256,6 +294,9 @@ impl GameSniffer {
     }
 
     fn reset_connection_state(&mut self, awaiting_handshake: bool) {
+        if let Some(conv_id) = self.active_conv.take() {
+            self.retired_convs.insert(conv_id);
+        }
         self.recv_kcp = None;
         self.sent_kcp = None;
         self.client_seed = None;
@@ -281,12 +322,29 @@ impl GameSniffer {
                 self.reset_connection_state(false);
                 Some(GamePacket::Connection(packet))
             },
-            ConnectionPacket::Disconnected => {
+            ConnectionPacket::Disconnected { conv_id } => {
+                if conv_id.is_some_and(|conv_id| {
+                    self.active_conv.is_some_and(|current| current != conv_id)
+                        || self.retired_convs.contains(&conv_id)
+                }) {
+                    return None;
+                }
                 self.reset_connection_state(true);
                 self.last_error = Some("game connection closed; capture a new login".into());
                 Some(GamePacket::Connection(packet))
             },
-            ConnectionPacket::HandshakeEstablished => Some(GamePacket::Connection(packet)),
+            ConnectionPacket::HandshakeEstablished { conv_id } => {
+                if let Some(conv_id) = conv_id {
+                    if self.awaiting_handshake
+                        || self.active_conv.is_some_and(|current| current != conv_id)
+                        || self.retired_convs.contains(&conv_id)
+                    {
+                        return None;
+                    }
+                    self.active_conv = Some(conv_id);
+                }
+                Some(GamePacket::Connection(packet))
+            },
 
             ConnectionPacket::SegmentData(direction, kcp_seg) => {
                 if self.awaiting_handshake {
@@ -294,6 +352,20 @@ impl GameSniffer {
                         Some("game connection closed; waiting for a new login handshake".into());
                     return None;
                 }
+                let Some(conv_id) = kcp::validate_kcp_segment(&kcp_seg) else {
+                    self.last_error = Some("incomplete KCP segment header".into());
+                    return None;
+                };
+                if self.retired_convs.contains(&conv_id)
+                    || self.active_conv.is_some_and(|current| current != conv_id)
+                {
+                    self.last_error =
+                        Some("KCP segment belongs to a retired or different conversation".into());
+                    return None;
+                }
+                // Both directions belong to the same login. Initial late-start
+                // capture can select its first conversation without a handshake.
+                self.active_conv = Some(conv_id);
                 let commands = self.receive_kcp_segment(direction, &kcp_seg);
                 match commands {
                     Some(commands) => Some(GamePacket::Commands(commands)),
@@ -333,7 +405,7 @@ impl GameSniffer {
             };
             let commands = data
                 .into_iter()
-                .filter_map(|data| self.receive_command(data))
+                .filter_map(|data| self.receive_command(data, direction))
                 .collect();
 
             return Some(commands);
@@ -343,7 +415,11 @@ impl GameSniffer {
     }
 
     #[instrument(skip_all, fields(len = data.len()))]
-    fn receive_command(&mut self, mut data: Vec<u8>) -> Option<GameCommand> {
+    fn receive_command(
+        &mut self,
+        mut data: Vec<u8>,
+        direction: PacketDirection,
+    ) -> Option<GameCommand> {
         if data.len() < 12 {
             self.reject_command("incomplete game command".into());
             return None;
@@ -436,7 +512,7 @@ impl GameSniffer {
 
         decrypt_command(key, &mut data);
 
-        let command = match GameCommand::try_new(data) {
+        let mut command = match GameCommand::try_new(data, direction) {
             Some(command) => command,
             None => {
                 self.reject_command("decrypted command has an invalid header or length".into());
@@ -457,14 +533,16 @@ impl GameSniffer {
         //     return None;
         // }
 
-        if let Some(Dispatch(_)) = self.key {
+        if direction == PacketDirection::Received && matches!(self.key, Some(Dispatch(_))) {
             if let Some(possible_seeds) =
                 matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone())
             {
+                command.is_token_response = true;
+                command.account_uid = identity::token_uid(&command.proto_data, &self.rsa_keys);
                 self.possible_seeds = possible_seeds;
                 info!(?self.possible_seeds, "setting new possible session seeds");
                 self.sent_time = command
-                    .parse_proto::<PacketHead>()
+                    .parse_header::<PacketHead>()
                     .ok()
                     .map(|head| head.sent_ms);
                 info!(?self.sent_time, "setting new send time");
@@ -491,41 +569,128 @@ mod capture_state_tests {
     #[test]
     fn malformed_command_lengths_and_missing_keys_are_diagnostic() {
         let mut sniffer = GameSniffer::new();
-        assert!(sniffer.receive_command(vec![0; 2]).is_none());
+        assert!(
+            sniffer
+                .receive_command(vec![0; 2], PacketDirection::Received)
+                .is_none()
+        );
         assert_eq!(sniffer.rejected_commands(), 1);
         assert_eq!(sniffer.last_error(), Some("incomplete game command"));
-        assert!(sniffer.receive_command(vec![0; 12]).is_none());
+        assert!(
+            sniffer
+                .receive_command(vec![0; 12], PacketDirection::Received)
+                .is_none()
+        );
         assert!(sniffer.last_error().unwrap().contains("version=17767"));
         let mut bytes = dispatch_command(&[8, 42]);
         bytes[6..10].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert!(GameCommand::try_new(bytes).is_none());
+        assert!(GameCommand::try_new(bytes, PacketDirection::Received).is_none());
     }
-    use protobuf::CodedOutputStream;
+    use protobuf::{CodedOutputStream, Message};
     use rsa::{Pkcs1v15Encrypt, RsaPublicKey, rand_core::OsRng};
 
     fn dispatch_command(body: &[u8]) -> Vec<u8> {
+        command_frame(&[], body)
+    }
+
+    fn command_frame(header: &[u8], body: &[u8]) -> Vec<u8> {
         let mut bytes = 0x4567u16.to_be_bytes().to_vec();
         bytes.extend_from_slice(&65500u16.to_be_bytes()); // unrelated, rotating command ID
-        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&(header.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(header);
         bytes.extend_from_slice(body);
         bytes.extend_from_slice(&0x89ABu16.to_be_bytes());
         bytes
     }
 
+    #[test]
+    fn command_header_and_body_keep_overlapping_fields_separate() {
+        let mut header = PacketHead::new();
+        header.user_id = 800000001;
+        header.sent_ms = 1700000000000;
+        let mut body = PacketHead::new();
+        body.user_id = 900000002;
+        body.sent_ms = 17;
+        let header_bytes = header.write_to_bytes().unwrap();
+        let body_bytes = body.write_to_bytes().unwrap();
+        for direction in [PacketDirection::Sent, PacketDirection::Received] {
+            let command =
+                GameCommand::try_new(command_frame(&header_bytes, &body_bytes), direction).unwrap();
+            assert_eq!(command.direction, direction);
+            assert!(!command.is_token_response);
+            assert_eq!(command.account_uid, None);
+            assert_eq!(command.header_data, header_bytes);
+            assert_eq!(command.proto_data, body_bytes);
+            assert_eq!(
+                command.to_bytes(),
+                command_frame(&header_bytes, &body_bytes)
+            );
+            let decoded_header = command.parse_header::<PacketHead>().unwrap();
+            assert_eq!(decoded_header.user_id, 800000001);
+            assert_eq!(decoded_header.sent_ms, 1700000000000);
+            let decoded_body = command.parse_proto::<PacketHead>().unwrap();
+            assert_eq!(decoded_body.user_id, 900000002);
+            assert_eq!(decoded_body.sent_ms, 17);
+        }
+    }
+
+    #[test]
+    fn framed_commands_reject_inconsistent_lengths_and_allow_empty_parts() {
+        for (header, body) in [
+            (&[][..], &[][..]),
+            (&[8, 1][..], &[][..]),
+            (&[][..], &[8, 2][..]),
+        ] {
+            let command =
+                GameCommand::try_new(command_frame(header, body), PacketDirection::Received)
+                    .unwrap();
+            assert_eq!(command.header_data, header);
+            assert_eq!(command.proto_data, body);
+        }
+        let valid = command_frame(&[8, 1], &[16, 2]);
+        for (offset, replacement) in [
+            (4, &u16::MAX.to_be_bytes()[..]),
+            (6, &u32::MAX.to_be_bytes()[..]),
+            (4, &1u16.to_be_bytes()[..]),
+            (6, &1u32.to_be_bytes()[..]),
+        ] {
+            let mut malformed = valid.clone();
+            malformed[offset..offset + replacement.len()].copy_from_slice(replacement);
+            assert!(GameCommand::try_new(malformed, PacketDirection::Received).is_none());
+        }
+        let mut truncated = valid.clone();
+        truncated.remove(10);
+        assert!(GameCommand::try_new(truncated, PacketDirection::Received).is_none());
+        let mut trailing = valid;
+        trailing.splice(trailing.len() - 2..trailing.len() - 2, [0]);
+        assert!(GameCommand::try_new(trailing, PacketDirection::Received).is_none());
+    }
+
     fn sniffer_with_token() -> GameSniffer {
         let mut sniffer = GameSniffer::new().set_initial_keys(HashMap::from([(0, vec![0; 4096])]));
         assert!(!sniffer.key_exchange_captured());
-        assert!(
-            sniffer
-                .receive_command(dispatch_command(&[8, 42]))
-                .is_some()
-        );
+        let ordinary = sniffer
+            .receive_command(dispatch_command(&[8, 42]), PacketDirection::Received)
+            .unwrap();
+        assert!(!ordinary.is_token_response);
         assert!(
             !sniffer.key_exchange_captured(),
             "ordinary dispatch data is not a token response"
         );
 
+        let token = sniffer
+            .receive_command(token_response_command(&sniffer), PacketDirection::Received)
+            .unwrap();
+        assert!(token.is_token_response);
+        assert_eq!(
+            token.account_uid, None,
+            "unknown token layouts stay unidentified"
+        );
+        sniffer
+    }
+
+    fn token_response_command(sniffer: &GameSniffer) -> Vec<u8> {
         // Encrypt a synthetic seed with the same public key as real token responses.
         let public = RsaPublicKey::from(&sniffer.rsa_keys[0]);
         let encrypted = public
@@ -533,23 +698,55 @@ mod capture_state_tests {
             .unwrap();
         let mut body = Vec::new();
         let mut out = CodedOutputStream::vec(&mut body);
-        out.write_uint64(6, 1700000000000).unwrap();
+        // An overlapping body field must not replace the PacketHead timestamp.
+        out.write_uint64(6, 17).unwrap();
         out.write_bytes(883, BASE64_STANDARD.encode(encrypted).as_bytes())
             .unwrap();
         out.flush().unwrap();
         drop(out);
-        assert!(sniffer.receive_command(dispatch_command(&body)).is_some());
-        sniffer
+        let mut header = PacketHead::new();
+        header.sent_ms = 1700000000000;
+        command_frame(&header.write_to_bytes().unwrap(), &body)
     }
 
     #[test]
     fn token_capture_is_observable_before_session_decryption_or_inventory() {
         let sniffer = sniffer_with_token();
         assert!(sniffer.key_exchange_captured());
+        assert_eq!(sniffer.sent_time, Some(1700000000000));
         assert!(
             matches!(sniffer.key, Some(Key::Dispatch(_))),
             "session key discovery has not happened yet"
         );
+    }
+
+    #[test]
+    fn outgoing_rsa_seed_does_not_mark_a_response_or_change_key_exchange_state() {
+        let mut sniffer = GameSniffer::new().set_initial_keys(HashMap::from([(0, vec![0; 4096])]));
+        let bytes = token_response_command(&sniffer);
+        let sent = sniffer
+            .receive_command(bytes.clone(), PacketDirection::Sent)
+            .unwrap();
+        assert_eq!(sent.direction, PacketDirection::Sent);
+        assert!(!sent.is_token_response);
+        assert_eq!(sent.account_uid, None);
+        assert!(!sniffer.key_exchange_captured());
+        assert!(sniffer.sent_time.is_none());
+
+        let incoming = sniffer
+            .receive_command(bytes, PacketDirection::Received)
+            .unwrap();
+        assert!(incoming.is_token_response);
+        assert!(sniffer.key_exchange_captured());
+        assert_eq!(sniffer.sent_time, Some(1700000000000));
+        let ordinary = sniffer
+            .receive_command(dispatch_command(&[8, 42]), PacketDirection::Received)
+            .unwrap();
+        assert!(
+            !ordinary.is_token_response,
+            "a previous token cannot identify another command"
+        );
+        assert!(sniffer.key_exchange_captured());
     }
 
     fn udp_frame(payload: &[u8], incoming: bool) -> Vec<u8> {
@@ -587,6 +784,174 @@ mod capture_state_tests {
         udp_frame(&segment, incoming)
     }
 
+    fn control_frame(code: u32, conv_id: Option<u32>, incoming: bool) -> Vec<u8> {
+        let mut payload = code.to_be_bytes().to_vec();
+        if let Some(conv_id) = conv_id {
+            payload.extend_from_slice(&conv_id.to_be_bytes());
+            payload.extend_from_slice(&[0; 12]);
+        }
+        udp_frame(&payload, incoming)
+    }
+
+    #[test]
+    fn both_directions_share_one_conversation_even_during_late_start_capture() {
+        let key = vec![0xA5; 4096];
+        let mut sniffer =
+            GameSniffer::new().set_initial_keys(HashMap::from([(0xA5A5, key.clone())]));
+        assert!(matches!(
+            sniffer.receive_packet(encrypted_frame(11, 0, &[8, 1], &key, true)),
+            Some(GamePacket::Commands(_))
+        ));
+        assert!(
+            sniffer
+                .receive_packet(encrypted_frame(22, 0, &[8, 2], &key, false))
+                .is_none()
+        );
+        assert!(sniffer.sent_kcp.is_none());
+        let Some(GamePacket::Commands(commands)) =
+            sniffer.receive_packet(encrypted_frame(11, 0, &[8, 3], &key, false))
+        else {
+            panic!("outgoing direction must retain the selected login");
+        };
+        assert_eq!(commands[0].proto_data, [8, 3]);
+    }
+
+    #[test]
+    fn new_login_rejects_retired_data_and_controls_without_losing_current_stream() {
+        let key = vec![0xA5; 4096];
+        let mut sniffer =
+            GameSniffer::new().set_initial_keys(HashMap::from([(0xA5A5, key.clone())]));
+        assert!(matches!(
+            sniffer.receive_packet(encrypted_frame(11, 0, &[8, 1], &key, true)),
+            Some(GamePacket::Commands(_))
+        ));
+        assert!(matches!(
+            sniffer.receive_packet(control_frame(0xFF, None, false)),
+            Some(GamePacket::Connection(ConnectionPacket::HandshakeRequested))
+        ));
+        // Delayed packets may arrive before either direction of the new login.
+        for incoming in [true, false] {
+            assert!(
+                sniffer
+                    .receive_packet(encrypted_frame(11, 1, &[8, 2], &key, incoming))
+                    .is_none()
+            );
+        }
+        assert!(sniffer.recv_kcp.is_none());
+        assert!(sniffer.sent_kcp.is_none());
+        assert!(matches!(
+            sniffer.receive_packet(control_frame(0x145, Some(22), true)),
+            Some(GamePacket::Connection(
+                ConnectionPacket::HandshakeEstablished { conv_id: Some(22) }
+            ))
+        ));
+        for incoming in [true, false] {
+            let Some(GamePacket::Commands(commands)) =
+                sniffer.receive_packet(encrypted_frame(22, 0, &[8, 3], &key, incoming))
+            else {
+                panic!("both new-login directions should decode");
+            };
+            assert_eq!(commands[0].proto_data, [8, 3]);
+            assert!(
+                sniffer
+                    .receive_packet(encrypted_frame(11, 2, &[8, 4], &key, incoming))
+                    .is_none()
+            );
+        }
+        for code in [404, 0x145] {
+            assert!(
+                sniffer
+                    .receive_packet(control_frame(code, Some(11), true))
+                    .is_none()
+            );
+        }
+        assert!(
+            sniffer
+                .receive_packet(control_frame(0x146, Some(22), true))
+                .is_none()
+        );
+        assert_eq!(sniffer.active_conv, Some(22));
+        for incoming in [true, false] {
+            let Some(GamePacket::Commands(commands)) =
+                sniffer.receive_packet(encrypted_frame(22, 1, &[8, 5], &key, incoming))
+            else {
+                panic!("retired controls must not clear current transport state");
+            };
+            assert_eq!(commands[0].proto_data, [8, 5]);
+        }
+    }
+
+    #[test]
+    fn retired_conversation_cannot_be_reopened_by_delayed_establishment() {
+        let key = vec![0xA5; 4096];
+        let mut sniffer =
+            GameSniffer::new().set_initial_keys(HashMap::from([(0xA5A5, key.clone())]));
+        assert!(matches!(
+            sniffer.receive_packet(encrypted_frame(11, 0, &[8, 1], &key, true)),
+            Some(GamePacket::Commands(_))
+        ));
+        assert!(matches!(
+            sniffer.receive_packet(control_frame(404, Some(11), true)),
+            Some(GamePacket::Connection(ConnectionPacket::Disconnected {
+                conv_id: Some(11)
+            }))
+        ));
+        assert!(
+            sniffer
+                .receive_packet(control_frame(0x145, Some(11), true))
+                .is_none()
+        );
+        assert!(matches!(
+            sniffer.receive_packet(control_frame(0xFF, None, false)),
+            Some(GamePacket::Connection(ConnectionPacket::HandshakeRequested))
+        ));
+        assert!(
+            sniffer
+                .receive_packet(encrypted_frame(11, 0, &[8, 2], &key, true))
+                .is_none()
+        );
+        // An outgoing or unknown control packet cannot authorize reuse.
+        assert!(
+            sniffer
+                .receive_packet(control_frame(0x145, Some(11), false))
+                .is_none()
+        );
+        assert!(
+            sniffer
+                .receive_packet(control_frame(0x146, Some(11), true))
+                .is_none()
+        );
+        assert!(
+            sniffer
+                .receive_packet(encrypted_frame(11, 0, &[8, 3], &key, true))
+                .is_none()
+        );
+        assert!(
+            sniffer
+                .receive_packet(control_frame(0x145, Some(11), true))
+                .is_none()
+        );
+        assert!(
+            sniffer
+                .receive_packet(encrypted_frame(11, 0, &[8, 4], &key, true))
+                .is_none()
+        );
+        // Without a correlated request nonce, even an explicit old ACK cannot
+        // authorize conversation reuse. A fresh conversation remains usable.
+        assert!(matches!(
+            sniffer.receive_packet(control_frame(0x145, Some(22), true)),
+            Some(GamePacket::Connection(
+                ConnectionPacket::HandshakeEstablished { conv_id: Some(22) }
+            ))
+        ));
+        let Some(GamePacket::Commands(commands)) =
+            sniffer.receive_packet(encrypted_frame(22, 0, &[8, 5], &key, true))
+        else {
+            panic!("a fresh conversation should survive a delayed old ACK");
+        };
+        assert_eq!(commands[0].proto_data, [8, 5]);
+    }
+
     #[test]
     fn disconnect_drops_old_encrypted_stream_until_a_new_handshake_request() {
         let key = vec![0xA5; 4096];
@@ -601,13 +966,24 @@ mod capture_state_tests {
             };
             assert_eq!(commands.len(), 1);
             assert_eq!(commands[0].proto_data, [8, 42]);
+            assert_eq!(commands[0].header_data, []);
+            assert_eq!(
+                commands[0].direction,
+                if incoming {
+                    PacketDirection::Received
+                } else {
+                    PacketDirection::Sent
+                }
+            );
         }
         sniffer.possible_seeds = vec![123456789];
         sniffer.sent_time = Some(1700000000000);
         sniffer.client_seed = Some(987654321);
         assert!(matches!(
             sniffer.receive_packet(udp_frame(&404u32.to_be_bytes(), true)),
-            Some(GamePacket::Connection(ConnectionPacket::Disconnected))
+            Some(GamePacket::Connection(ConnectionPacket::Disconnected {
+                conv_id: None
+            }))
         ));
         assert!(sniffer.recv_kcp.is_none());
         assert!(sniffer.sent_kcp.is_none());
@@ -626,12 +1002,11 @@ mod capture_state_tests {
         assert!(sniffer.recv_kcp.is_none());
         assert!(sniffer.sent_kcp.is_none());
         assert!(sniffer.key.is_none());
-        // The current parser labels unknown short control codes as established;
-        // those alone cannot establish a fresh post-disconnect login.
+        // An establishment without a fresh request cannot reopen a closed stream.
         assert!(matches!(
             sniffer.receive_packet(udp_frame(&0x145u32.to_be_bytes(), true)),
             Some(GamePacket::Connection(
-                ConnectionPacket::HandshakeEstablished
+                ConnectionPacket::HandshakeEstablished { conv_id: None }
             ))
         ));
         assert!(

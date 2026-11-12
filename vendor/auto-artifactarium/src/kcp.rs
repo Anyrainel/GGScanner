@@ -97,8 +97,9 @@ fn new_kcp(conv_id: u32) -> Kcp<Vec<u8>> {
     kcp
 }
 
-fn validate_kcp_segment(payload: &[u8]) -> Option<u32> {
-    if payload.len() <= KCP_OVERHEAD {
+pub(crate) fn validate_kcp_segment(payload: &[u8]) -> Option<u32> {
+    // The game adds two four-byte extensions to the regular KCP header.
+    if payload.len() < KCP_OVERHEAD + 8 {
         warn!(
             len = payload.len(),
             data = bytes_as_hex(payload),

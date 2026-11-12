@@ -10,7 +10,7 @@ use crate::scanner::common::character_element::{
     good_element_from_skill_depot, MULTI_ELEMENT_CHARACTERS,
 };
 use crate::scanner::common::models::{
-    GoodArtifact, GoodCharacter, GoodExport, GoodSubStat, GoodTalent, GoodWeapon,
+    GoodArtifact, GoodCharacter, GoodExport, GoodMetadata, GoodSubStat, GoodTalent, GoodWeapon,
 };
 
 use crate::game_data::types::{to_good_key, DataCache, Property, SkillType};
@@ -71,6 +71,7 @@ const MIN_ARTIFACT_RARITY: u32 = 4;
 /// Accumulates packet data and exports to GOOD format.
 pub struct PlayerData {
     data_cache: DataCache,
+    uid: Option<u32>,
     characters: Vec<AvatarInfo>,
     items: Vec<Item>,
     completed_achievement_ids: Vec<u32>,
@@ -81,6 +82,7 @@ impl PlayerData {
     pub fn new(data_cache: DataCache) -> Self {
         Self {
             data_cache,
+            uid: None,
             characters: Vec::new(),
             items: Vec::new(),
             completed_achievement_ids: Vec::new(),
@@ -90,10 +92,20 @@ impl PlayerData {
 
     /// Clear data accumulated by the previous capture session.
     pub fn begin_capture(&mut self) {
+        self.uid = None;
         self.characters.clear();
         self.items.clear();
         self.completed_achievement_ids.clear();
         self.character_equip_guid_map.clear();
+    }
+
+    /// Identity must come from the same login response as this inventory.
+    pub fn set_uid(&mut self, uid: Option<u32>) {
+        self.uid = uid;
+    }
+
+    pub fn uid(&self) -> Option<u32> {
+        self.uid
     }
 
     /// Count characters (formal avatars only, avatar_type == 1).
@@ -212,7 +224,10 @@ impl PlayerData {
             format: "GOOD".to_string(),
             version: 3,
             source: "yas-GOODScanner".to_string(),
-            metadata: None,
+            metadata: self.uid.map(|uid| GoodMetadata {
+                uid: Some(uid.to_string()),
+                nickname: None,
+            }),
             characters,
             weapons,
             artifacts,

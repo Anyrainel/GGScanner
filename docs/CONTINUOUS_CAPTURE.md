@@ -65,12 +65,14 @@ not the currently viewed profile. Previously unknown UIDs create a profile or
 bind the existing unbound Default when no matching UID profile exists. An existing
 UID profile always wins over Default promotion; unrelated profiles are retained.
 
-Current Genshin capture does not provide a validated UID or player nickname.
-The Genshin website therefore keeps one explicitly enabled fallback profile and
-applies unidentified captures there regardless of which account is logged in.
-Optional GOOD `metadata.uid` and `metadata.nickname` are supported for identified
-imports, but no UID is guessed from arbitrary scalar fields or character names.
-See `GENSHIN_EXPORT.md` for the current protocol-validation boundary.
+Genshin capture provides `metadata.uid` from its verified incoming login
+response. It clears identity together with inventory on a new login, including
+reconnects to the same UID, and waits for identity plus the initial inventory
+before publishing. Unsupported login identity layouts report a capture error.
+No player nickname is currently exported. Legacy unidentified snapshots use the
+website's one explicitly enabled fallback profile. No UID is guessed from
+arbitrary scalar fields or character names. See `GENSHIN_EXPORT.md` for the
+reviewed protocol layout and validation boundary.
 
 Star Rail's reviewed login layout provides UID and optional nickname from the
 same incoming KCP conversation as its inventory. Normal and continuous capture
