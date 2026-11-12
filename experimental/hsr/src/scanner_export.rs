@@ -40,6 +40,8 @@ pub struct CaptureExportDetails {
     /// Private instance IDs aligned with deterministic normalized capture order.
     /// These are hashed with the account UID before public export.
     pub instance_ids: Option<CaptureInstanceIds>,
+    /// Observed removals since this login, using the same private ID families.
+    pub deleted_instance_ids: CaptureInstanceIds,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -165,6 +167,14 @@ pub fn build_scanner_export(
         "coverage": snapshot.evidence.coverage, "characters": characters, "light_cones": cones, "relics": relics});
     if stable_ids.is_some() {
         export["generator"]["itemIdentity"] = json!("account-instance-v1");
+        let deleted = &details.deleted_instance_ids;
+        if !deleted.light_cones.is_empty() || !deleted.relics.is_empty() {
+            let uid = stable_ids.unwrap().0;
+            export["generator"]["deletedInstanceIds"] = json!({
+                "lightCones": deleted.light_cones.iter().map(|id| opaque_instance_id(uid, b"light-cone", *id)).collect::<Vec<_>>(),
+                "relics": deleted.relics.iter().map(|id| opaque_instance_id(uid, b"relic", *id)).collect::<Vec<_>>()
+            });
+        }
     }
     // Presence is authoritative, including []. Absence means achievements were not observed.
     // TODO(ocr): completed achievements are not visible inventory text; omit the field.

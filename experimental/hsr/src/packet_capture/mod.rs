@@ -41,11 +41,12 @@ use crate::{localization::LocalizedText, HsrError, HsrResult};
 
 mod dump;
 mod inventory;
+mod inventory_sync;
 pub mod proto;
 pub mod protocol;
 
 /// Decoder revision written into HSR exports.
-pub const HSR_CAPTURE_REVISION: &str = "reliquary-quest-4.6-v2";
+pub const HSR_CAPTURE_REVISION: &str = "reliquary-sync-4.6-v3";
 
 /// HSR's two UDP gateway ports. Kept public for build-time regression tests.
 pub const HSR_PACKET_PORTS: [u16; 2] = [23301, 23302];
@@ -194,7 +195,12 @@ impl HsrPacketDecoder {
                         continue;
                     }
                     self.state.command_count += 1;
-                    self.receive_command(&decoded.command.proto_data)?;
+                    let deleted = inventory_sync::deletions(
+                        decoded.dispatch_key_id,
+                        decoded.command.command_id,
+                        &decoded.command.proto_data,
+                    )?;
+                    self.receive_inventory_command(&decoded.command.proto_data, deleted)?;
                     if self.state.has_characters
                         || self.state.has_light_cones
                         || self.state.has_relics
@@ -252,10 +258,21 @@ impl HsrPacketDecoder {
 
     /// Decrypted-command replay; wrappers and command IDs are not assumed.
     pub fn receive_command(&mut self, bytes: &[u8]) -> HsrResult<()> {
+        self.receive_inventory_command(bytes, None)
+    }
+
+    fn receive_inventory_command(
+        &mut self,
+        bytes: &[u8],
+        deleted: Option<crate::scanner_export::CaptureInstanceIds>,
+    ) -> HsrResult<()> {
         if let Some(dump) = &mut self.packet_dump {
             dump.write(bytes)?;
         }
         self.inventory.receive(bytes)?;
+        if let Some(deleted) = deleted {
+            self.inventory.remove_instances(deleted)?;
+        }
         if self.targets.achievements && !self.state.has_achievements {
             for container in protocol::containers(bytes) {
                 if let Some(snapshot) = protocol::decode_quest_command(container)? {

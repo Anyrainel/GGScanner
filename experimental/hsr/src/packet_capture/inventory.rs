@@ -19,8 +19,11 @@ pub struct InventoryDecoder {
     references: ReferenceCache,
     targets: CaptureTargets,
     affixes: PacketReferences,
+    equipment_initialized: bool,
     cones_by_id: BTreeMap<u32, Equipment>,
     relics_by_id: BTreeMap<u32, Relic>,
+    deleted_cones: BTreeSet<u32>,
+    deleted_relics: BTreeSet<u32>,
     pub export_details: crate::scanner_export::CaptureExportDetails,
     pub characters: Option<Vec<ObservedCharacter>>,
     pub light_cones: Option<Vec<ObservedLightCone>>,
@@ -36,8 +39,11 @@ impl InventoryDecoder {
         Ok(Self {
             continuous: false,
             revision: 0,
+            equipment_initialized: false,
             cones_by_id: BTreeMap::new(),
             relics_by_id: BTreeMap::new(),
+            deleted_cones: BTreeSet::new(),
+            deleted_relics: BTreeSet::new(),
             references,
             targets,
             affixes,
@@ -50,8 +56,11 @@ impl InventoryDecoder {
 
     pub fn reset(&mut self) {
         self.revision = 0;
+        self.equipment_initialized = false;
         self.cones_by_id.clear();
         self.relics_by_id.clear();
+        self.deleted_cones.clear();
+        self.deleted_relics.clear();
         self.export_details = Default::default();
         self.characters = None;
         self.light_cones = None;
@@ -219,8 +228,7 @@ impl InventoryDecoder {
                 });
                 let full = cones.is_some() && relics.is_some();
                 let update = self.continuous
-                    && self.light_cones.is_some()
-                    && self.relics.is_some()
+                    && self.equipment_initialized
                     && (cones.is_some() || relics.is_some());
                 if full || update {
                     if matches!((&cones, &relics), (Some((a, _)), Some((b, _))) if a == b) {
@@ -231,6 +239,7 @@ impl InventoryDecoder {
                         if !incoming.insert(cone.unique_id) {
                             return Err(invalid("duplicate light cone instance"));
                         }
+                        self.deleted_cones.remove(&cone.unique_id);
                         self.cones_by_id.insert(cone.unique_id, cone);
                     }
                     incoming.clear();
@@ -238,58 +247,99 @@ impl InventoryDecoder {
                         if !incoming.insert(relic.unique_id) {
                             return Err(invalid("duplicate relic instance"));
                         }
+                        self.deleted_relics.remove(&relic.unique_id);
                         self.relics_by_id.insert(relic.unique_id, relic);
                     }
-                    let cones: Vec<_> = self.cones_by_id.values().cloned().collect();
-                    let relics: Vec<_> = self.relics_by_id.values().cloned().collect();
-                    let mut ids = BTreeSet::new();
-                    let mut normalized_cones = Vec::new();
-                    for cone in cones.into_iter().filter(|_| self.targets.light_cones) {
-                        if !ids.insert(cone.unique_id) {
-                            return Err(invalid("duplicate light cone instance"));
-                        }
-                        normalized_cones.push(ObservedLightCone {
+                    self.equipment_initialized = true;
+                    self.refresh_equipment()?;
+                    self.revision += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_instances(
+        &mut self,
+        deleted: crate::scanner_export::CaptureInstanceIds,
+    ) -> HsrResult<()> {
+        if !self.continuous || !self.equipment_initialized {
+            return Ok(());
+        }
+        let mut changed = false;
+        for id in deleted.light_cones {
+            if self.cones_by_id.remove(&id).is_some() {
+                self.deleted_cones.insert(id);
+                changed = true;
+            }
+        }
+        for id in deleted.relics {
+            if self.relics_by_id.remove(&id).is_some() {
+                self.deleted_relics.insert(id);
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_equipment()?;
+            self.revision += 1;
+        }
+        Ok(())
+    }
+
+    fn refresh_equipment(&mut self) -> HsrResult<()> {
+        if self.targets.light_cones {
+            self.light_cones = Some(
+                self.cones_by_id
+                    .values()
+                    .map(|cone| {
+                        Ok(ObservedLightCone {
                             light_cone_id: cone.tid,
                             level: cone.level as u8,
                             ascension: cone.promotion as u8,
                             superimposition: cone.rank as u8,
                             equipped_character_id: self.location(cone.equip_avatar_id)?,
                             lock: Some(cone.is_protected),
-                        });
-                    }
-                    ids.clear();
-                    let mut normalized_relics = Vec::new();
-                    for relic in relics.into_iter().filter(|_| self.targets.relics) {
-                        if !ids.insert(relic.unique_id) {
-                            return Err(invalid("duplicate relic instance"));
-                        }
-                        normalized_relics.push(self.relic(relic)?);
-                    }
-                    self.export_details.instance_ids =
-                        Some(crate::scanner_export::CaptureInstanceIds {
-                            light_cones: self
-                                .cones_by_id
-                                .keys()
-                                .copied()
-                                .filter(|_| self.targets.light_cones)
-                                .collect(),
-                            relics: self
-                                .relics_by_id
-                                .keys()
-                                .copied()
-                                .filter(|_| self.targets.relics)
-                                .collect(),
-                        });
-                    self.revision += 1;
-                    if self.targets.light_cones {
-                        self.light_cones = Some(normalized_cones);
-                    }
-                    if self.targets.relics {
-                        self.relics = Some(normalized_relics);
-                    }
-                }
-            }
+                        })
+                    })
+                    .collect::<HsrResult<_>>()?,
+            );
         }
+        if self.targets.relics {
+            self.relics = Some(
+                self.relics_by_id
+                    .values()
+                    .map(|relic| self.relic(relic.clone()))
+                    .collect::<HsrResult<_>>()?,
+            );
+        }
+        self.export_details.instance_ids = Some(crate::scanner_export::CaptureInstanceIds {
+            light_cones: self
+                .cones_by_id
+                .keys()
+                .copied()
+                .filter(|_| self.targets.light_cones)
+                .collect(),
+            relics: self
+                .relics_by_id
+                .keys()
+                .copied()
+                .filter(|_| self.targets.relics)
+                .collect(),
+        });
+        self.export_details.deleted_instance_ids = crate::scanner_export::CaptureInstanceIds {
+            light_cones: self
+                .deleted_cones
+                .iter()
+                .copied()
+                .filter(|_| self.targets.light_cones)
+                .collect(),
+            relics: self
+                .deleted_relics
+                .iter()
+                .copied()
+                .filter(|_| self.targets.relics)
+                .collect(),
+        };
         Ok(())
     }
 

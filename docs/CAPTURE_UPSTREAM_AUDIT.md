@@ -147,3 +147,50 @@ tests, 11 checker tests and the release executable build. Bundled keys and
 watched Genshin upstream sources match. The combined source checker separately
 flagged newer Reliquary (Star Rail) upstream changes; that unrelated review
 baseline was left unchanged.
+
+## Continuous inventory deletion review — 2026-11-12
+
+The existing reducers already replaced equipment records under the same instance
+ID. Continuous deletion support now consumes explicit server notifications,
+retains ready empty inventories, and tests upgrade/consume/salvage sequences.
+
+For Genshin, reviewed Teyvat.me Capture
+[`05a3bb8b`](https://github.com/tawan475/teyvat.me-capture/tree/05a3bb8b0f8c02432c307ae43ba68277e2141206),
+specifically `crates/protocol/src/lib.rs` and `unk_util.rs`. Its strict
+StoreItemDelNotify matcher requires exactly one packed GUID list and a
+store-type scalar (1 or 2). The local implementation additionally requires
+incoming traffic, verified login identity, and known held instances. Looser
+GUID discovery can mistake enhancement targets or strongbox outputs for deleted
+items. The MIT attribution is retained in `THIRD_PARTY_NOTICES.md`.
+
+For Star Rail, reviewed Reliquary's existing pinned 4.6 revision
+[`938287c5`](https://github.com/IceDynamix/reliquary/tree/938287c5cbba930ad68aa3f7010cf7ad953bc654),
+including `command_id.rs` and `PlayerSyncScNotify.rs`. Destructive deltas require
+dispatch key identifier `2920436228` and incoming command `634`:
+`del_equipment_list` is field 4 and `del_relic_list` field 15, with packed or
+unpacked uint32 values. Unknown IDs do not delete held records. The exporter
+retains cumulative account-scoped opaque deletion IDs for polling consumers;
+the website removes exact matching captured instances before its normal partial
+merge. Missing inventory alone remains insufficient evidence for deletion.
+
+The current upstream Star Rail 4.7 schemas rotate command IDs and inner equipment
+fields. The existing local inventory decoder and dispatch-key set remain 4.6;
+this change does **not** establish 4.7 compatibility. Updating that protocol and
+validating a fresh login remain separate work. The source drift alarm should
+continue to report the unreviewed 4.7 changes rather than bless them by updating
+all fingerprints.
+
+Also compared the ZZZ reference
+[`cec65746`](https://github.com/pingwinekZ/zzz_packet_capture_0delay/blob/cec65746da79b6d85f55752cb5487436a7408f48/rust/crates/zzz-scan/src/snapshot.rs).
+It replaces equipment by UID and handles explicit `deletedEquips`; its broad
+unknown-field deletion fallback and request-side dismantle deletion were not
+adopted. Its empty-category-to-null export conversion was also not adopted:
+loaded empty inventory must remain distinguishable from inventory not captured.
+
+These findings and synthetic packet regressions establish implementation
+behavior. No fresh live-game enhancement, strongbox or salvage session was run.
+
+Validation passed 340 Genshin tests (4 ignored), 214 Star Rail tests, 21 Genshin
+website continuous-import tests, the full GGStarRail check (1,263 app tests and
+45 Worker tests), 11 capture-checker tests, Rust formatting and the Windows
+GGScanner release build. All 35 reviewed local source fingerprints match.

@@ -444,7 +444,24 @@ impl CaptureMonitor {
                 continue;
             }
 
-            if let Some(achievement_ids) = try_match_achievements(&command.proto_data) {
+            if let Some(guids) = self
+                .player_data
+                .uid()
+                .filter(|_| self.accepts_incremental_updates())
+                .and_then(|uid| super::inventory_updates::deleted_items(&command.proto_data, uid))
+            {
+                let removed = self.player_data.remove_items(&guids);
+                data_changed |= removed > 0;
+                let mut state = self.state.lock().expect("capture state poisoned");
+                state.weapon_count = self.player_data.weapon_count();
+                state.artifact_count = self.player_data.artifact_count();
+                log_debug!(
+                    "捕获到物品删除数据包 (cmd={})，移除 {} 个物品",
+                    "Captured item deletion packet (cmd={}), removed {} items",
+                    command.command_id,
+                    removed,
+                );
+            } else if let Some(achievement_ids) = try_match_achievements(&command.proto_data) {
                 log_info!(
                     "捕获到成就数据包 (cmd={})，共 {} 个已完成成就",
                     "Captured achievement packet (cmd={}), {} completed achievements",
@@ -481,7 +498,9 @@ impl CaptureMonitor {
                     // Recent game versions may split store categories across
                     // multiple notifications. Do not stop after a weapon-only
                     // batch before the artifact batch has arrived.
-                    state.has_items = state.weapon_count > 0 && state.artifact_count > 0;
+                    // Once the baseline has arrived, consuming the last item of
+                    // a family must not make subsequent deltas unavailable.
+                    state.has_items |= state.weapon_count > 0 && state.artifact_count > 0;
                 }
             } else if let Some(avatars) = try_match_avatars(&command.proto_data).or_else(|| {
                 if !self.accepts_incremental_updates() {
@@ -1847,6 +1866,152 @@ mod tests {
         let (items, avatars) = identity_inventory(guid_offset);
         monitor.process_packet(identity_kcp_frame(conv, 1, &items, true));
         monitor.process_packet(identity_kcp_frame(conv, 2, &avatars, true));
+    }
+
+    fn inventory_change_packet(item: &Item) -> Vec<u8> {
+        let mut packet = Unk::new();
+        packet
+            .mut_unknown_fields()
+            .add_length_delimited(12, item.write_to_bytes().unwrap());
+        // Enhancement deltas may also carry consumed material counts, including
+        // virtual materials without an instance GUID. Gear still updates.
+        let mut material = Item::new();
+        material.item_id = 104_013;
+        material.mut_material().count = 0;
+        packet
+            .mut_unknown_fields()
+            .add_length_delimited(12, material.write_to_bytes().unwrap());
+        packet.mut_unknown_fields().add_varint(1, 1);
+        identity_command_frame(&packet.write_to_bytes().unwrap())
+    }
+
+    fn inventory_delete_packet(guids: &[u64]) -> Vec<u8> {
+        let mut packed = Vec::new();
+        for guid in guids {
+            push_varint(*guid, &mut packed);
+        }
+        let mut body = Vec::new();
+        push_message_field(4, &packed, &mut body);
+        push_varint_field(15, 1, &mut body);
+        identity_command_frame(&body)
+    }
+
+    #[test]
+    fn continuous_upgrade_and_consumption_replace_then_remove_inventory_including_last_item() {
+        let uid = 800_000_001;
+        let base = u64::from(uid) << 32;
+        let (mut monitor, latest) = identity_test_monitor();
+        identity_begin_login(&mut monitor, 41, uid);
+        let (items, _) = identity_inventory(base);
+        let command = GameCommand::try_new(items, PacketDirection::Received).unwrap();
+        let mut artifact = try_match_items(&command.proto_data)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.guid == base + 11)
+            .unwrap();
+        monitor.process_commands(vec![GameCommand::try_new(
+            inventory_change_packet(&artifact),
+            PacketDirection::Received,
+        )
+        .unwrap()]);
+        assert!(!monitor.state.lock().unwrap().has_items);
+        assert_eq!(monitor.player_data.artifact_count(), 0);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
+        identity_publish_inventory(&mut monitor, 41, base);
+        artifact.mut_equip().mut_reliquary().level = 5;
+        artifact.mut_equip().is_locked = true;
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            3,
+            &inventory_change_packet(&artifact),
+            true,
+        ));
+        let upgraded = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
+        assert_eq!(upgraded["data"]["artifacts"].as_array().unwrap().len(), 6);
+        assert_eq!(upgraded["data"]["artifacts"][0]["level"], 4);
+        assert_eq!(upgraded["data"]["artifacts"][0]["lock"], true);
+
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            4,
+            &inventory_delete_packet(&[artifact.guid]),
+            true,
+        ));
+        let deleted = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
+        assert_eq!(deleted["data"]["artifacts"].as_array().unwrap().len(), 5);
+        assert!(deleted["revision"].as_u64().unwrap() > upgraded["revision"].as_u64().unwrap());
+        let remaining: Vec<_> = (1..=6)
+            .chain(12..=16)
+            .map(|counter| base + counter)
+            .collect();
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            5,
+            &inventory_delete_packet(&remaining),
+            true,
+        ));
+        let (status, empty) = crate::continuous::ContinuousCapture::response(Some(&latest));
+        assert_eq!(status, 200);
+        assert!(empty["data"]["artifacts"].as_array().unwrap().is_empty());
+        assert!(empty["data"]["weapons"].as_array().unwrap().is_empty());
+        assert_eq!(monitor.state.lock().unwrap().artifact_count, 0);
+        assert!(monitor.state.lock().unwrap().has_items);
+
+        // Repeated/unknown deletions do not change content or its revision.
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            6,
+            &inventory_delete_packet(&[artifact.guid, base + 999]),
+            true,
+        ));
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).1,
+            empty
+        );
+        // A new artifact still arrives after consuming the final old item.
+        artifact.guid = base + 1000;
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            7,
+            &inventory_change_packet(&artifact),
+            true,
+        ));
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).1["data"]["artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn continuous_deletes_ignore_outgoing_and_other_account_guids() {
+        let uid = 800_000_001;
+        let base = u64::from(uid) << 32;
+        let (mut monitor, latest) = identity_test_monitor();
+        identity_begin_login(&mut monitor, 41, uid);
+        identity_publish_inventory(&mut monitor, 41, base);
+        let original = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            0,
+            &inventory_delete_packet(&[base + 11]),
+            false,
+        ));
+        monitor.process_packet(identity_kcp_frame(
+            41,
+            3,
+            &inventory_delete_packet(&[((u64::from(uid) + 1) << 32) + 11]),
+            true,
+        ));
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).1,
+            original
+        );
     }
 
     #[test]

@@ -56,6 +56,7 @@ not captured; do not invent empty coverage.
 | Field | When present |
 |---|---|
 | `generator` | `{name:"GOODScanner", version, captureRevision, compatibility}` |
+| `generator.deletedInstanceIds` | Optional `{relics:string[], lightCones:string[]}` containing cumulative confirmed deletions in this login, as the same opaque hashes used by `_uid`. Requires verified `metadata.uid` and `generator.itemIdentity: "account-instance-v1"`. Continuous consumers remove only matching captured instances for that UID, preserving unrelated absent records. A reappearing instance drops its deletion marker; a new login clears all markers. Manual imports retain their normal coverage semantics. |
 | `coverage` | `{characters, lightCones, relics}` each `complete` / `unknown` / … |
 | `metadata.current_trailblazer_path` | current Trailblazer path, same names as `characters[].path` |
 | `quests` | `{schemaVersion:1, coverage:"complete", records:[{id,status,progress,counters}]}`; records sorted by unique positive ID. Omitted means no Quest snapshot was captured |

@@ -199,7 +199,10 @@ mod tests {
             (503, json!({"error":"continuous_capture_no_data"}))
         );
         capture.publish(first_account.clone());
-        assert_eq!(ContinuousCapture::response(Some(&capture)).1["data"], first_account);
+        assert_eq!(
+            ContinuousCapture::response(Some(&capture)).1["data"],
+            first_account
+        );
     }
 
     #[test]

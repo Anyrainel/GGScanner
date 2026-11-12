@@ -453,6 +453,58 @@ fn no_selected_categories_is_rejected() {
 }
 
 #[test]
+fn continuous_selected_gear_category_keeps_replacing_instances() {
+    for light_cones in [false, true] {
+        let mut decoder = HsrPacketDecoder::new(
+            load_embedded_gilore_reference().unwrap(),
+            CaptureTargets {
+                characters: false,
+                light_cones,
+                relics: !light_cones,
+                achievements: false,
+            },
+        )
+        .unwrap();
+        decoder.enable_continuous();
+        decoder.receive_command(&bag(6, 7)).unwrap();
+        assert!(decoder.state().complete);
+        let update = if light_cones {
+            Equipment {
+                tid: 23005,
+                unique_id: 77,
+                level: 70,
+                promotion: 5,
+                rank: 1,
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap()
+        } else {
+            Relic {
+                tid: 61011,
+                unique_id: 88,
+                level: 4,
+                main_affix_id: 1,
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap()
+        };
+        decoder.receive_command(&group(99, &[update])).unwrap();
+        let inventory = decoder.state().inventory.as_ref().unwrap();
+        if light_cones {
+            assert_eq!(inventory.light_cones.len(), 1);
+            assert_eq!(inventory.light_cones[0].level, 70);
+            assert!(inventory.gear.is_empty());
+        } else {
+            assert_eq!(inventory.gear.len(), 1);
+            assert_eq!(inventory.gear[0].level, 4);
+            assert!(inventory.light_cones.is_empty());
+        }
+    }
+}
+
+#[test]
 fn common_export_preserves_selected_capture_records_and_character_progression() {
     let refs = load_embedded_gilore_reference().unwrap();
     let mut decoder = HsrPacketDecoder::new(

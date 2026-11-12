@@ -50,6 +50,8 @@ pub enum GamePacket {
 pub(crate) struct DecodedCommand {
     pub command: GameCommand,
     pub identity_update: Option<IdentityUpdate>,
+    /// Retained dispatch revision identifies the reviewed destructive sync schema.
+    pub dispatch_key_id: Option<u32>,
 }
 
 #[cfg(test)]
@@ -390,6 +392,7 @@ impl ConversationSniffer {
         Ok(DecodedCommand {
             command,
             identity_update,
+            dispatch_key_id: self.dispatch_key_id,
         })
     }
 

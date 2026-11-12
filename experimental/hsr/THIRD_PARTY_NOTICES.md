@@ -15,6 +15,13 @@ The seven inventory record types under `src/packet_capture/proto/` are sourced
 from [Reliquary v24.0.0 / HSR 4.6](https://github.com/IceDynamix/reliquary/tree/0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38),
 revision `0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38`, under the same MIT license.
 
+Continuous inventory deletion uses Reliquary HSR 4.6 revision
+[`938287c5cbba930ad68aa3f7010cf7ad953bc654`](https://github.com/IceDynamix/reliquary/tree/938287c5cbba930ad68aa3f7010cf7ad953bc654),
+`src/network/command/command_id.rs` and `proto/PlayerSyncScNotify.rs`, under
+the same MIT license. The local decoder requires that reviewed dispatch revision
+and command before applying explicit relic or Light Cone instance removals.
+The newer HSR 4.7 inventory schemas have not been adopted here.
+
 The local adaptation preserves independent KCP conversations, removes raw
 packet/seed trace logging, bounds malformed frames, and infers the login seed
 from the protobuf shape instead of the upstream token command ID/field tag.

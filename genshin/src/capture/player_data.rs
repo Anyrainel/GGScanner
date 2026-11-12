@@ -195,6 +195,17 @@ impl PlayerData {
         }
     }
 
+    /// Only explicit, validated store deletions remove inventory. A partial
+    /// refresh cannot prove that any omitted item was consumed or recycled.
+    pub fn remove_items(&mut self, guids: &[u64]) -> usize {
+        let removed: std::collections::HashSet<_> = guids.iter().copied().collect();
+        let previous = self.items.len();
+        self.items.retain(|item| !removed.contains(&item.guid));
+        self.character_equip_guid_map
+            .retain(|guid, _| !removed.contains(guid));
+        previous - self.items.len()
+    }
+
     pub fn export(&self, settings: &CaptureExportSettings) -> anyhow::Result<GoodExport> {
         let characters = if settings.include_characters {
             Some(self.export_characters(settings))

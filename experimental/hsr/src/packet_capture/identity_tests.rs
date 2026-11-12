@@ -130,6 +130,210 @@ fn targets() -> CaptureTargets {
     }
 }
 
+fn sync(relics: &[u32], cones: &[u32], packed: bool) -> Vec<u8> {
+    fields(|out| {
+        if packed {
+            out.write_repeated_packed_uint32(15, relics).unwrap();
+            out.write_repeated_packed_uint32(4, cones).unwrap();
+        } else {
+            for id in relics {
+                out.write_uint32(15, *id).unwrap();
+            }
+            for id in cones {
+                out.write_uint32(4, *id).unwrap();
+            }
+        }
+    })
+}
+
+fn relic_sync(id: u32, level: u32) -> Vec<u8> {
+    let relic = proto::Relic::Relic {
+        tid: 61011,
+        unique_id: id,
+        level,
+        main_affix_id: 1,
+        ..Default::default()
+    };
+    fields(|out| {
+        out.write_bytes(5, &relic.write_to_bytes().unwrap())
+            .unwrap()
+    })
+}
+
+#[test]
+fn verified_sync_replaces_gear_and_keeps_cumulative_deletions_until_login_reset() {
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
+    decoder.enable_continuous();
+    configure(&mut decoder);
+    for frame in frames(11, 600_000_001, SEED_A, "First") {
+        decoder.receive_packet(frame).unwrap();
+    }
+    let first = decoder.state().build_scanner_export(&refs).unwrap();
+    let relic_id = first["relics"][0]["_uid"].clone();
+    let cone_id = first["light_cones"][0]["_uid"].clone();
+    let key = session_key(SEED_A);
+    // The same instance is replaced, while a new instance appends.
+    for (sequence, id, level) in [(4, 88, 0), (5, 88, 4), (6, 89, 8)] {
+        decoder
+            .receive_packet(incoming(11, sequence, 634, &relic_sync(id, level), &key))
+            .unwrap();
+    }
+    let upgraded = decoder.state().build_scanner_export(&refs).unwrap();
+    assert_eq!(upgraded["relics"].as_array().unwrap().len(), 2);
+    assert_eq!(upgraded["relics"][0]["_uid"], relic_id);
+    assert_eq!(upgraded["relics"][0]["level"], 4);
+    let second_id = upgraded["relics"][1]["_uid"].clone();
+    let mut upgrade_and_consume = relic_sync(89, 12);
+    upgrade_and_consume.extend(sync(&[88], &[], true));
+    decoder
+        .receive_packet(incoming(11, 7, 634, &upgrade_and_consume, &key))
+        .unwrap();
+    let consumed = decoder.state().build_scanner_export(&refs).unwrap();
+    assert_eq!(consumed["relics"].as_array().unwrap().len(), 1);
+    assert_eq!(consumed["relics"][0]["_uid"], second_id);
+    assert_eq!(consumed["relics"][0]["level"], 12);
+    // A client can miss the first deletion and still receive both later.
+    decoder
+        .receive_packet(incoming(11, 8, 634, &sync(&[89], &[77], false), &key))
+        .unwrap();
+    let empty = decoder.state().build_scanner_export(&refs).unwrap();
+    assert!(decoder.state().complete);
+    assert_eq!(decoder.state().relic_count, 0);
+    assert_eq!(decoder.state().light_cone_count, 0);
+    assert_eq!(empty["relics"], serde_json::json!([]));
+    assert_eq!(empty["light_cones"], serde_json::json!([]));
+    assert_eq!(
+        empty["generator"]["deletedInstanceIds"]["relics"],
+        serde_json::json!([relic_id, second_id])
+    );
+    assert_eq!(
+        empty["generator"]["deletedInstanceIds"]["lightCones"],
+        serde_json::json!([cone_id])
+    );
+    assert_eq!(empty["generator"]["itemIdentity"], "account-instance-v1");
+    let mut anonymous = decoder.state().export_details.clone();
+    anonymous.uid = None;
+    let anonymous_export = crate::scanner_export::build_scanner_export(
+        decoder.state().inventory.as_ref().unwrap(),
+        &refs,
+        &anonymous,
+        None,
+    )
+    .unwrap();
+    assert!(anonymous_export["generator"]
+        .get("deletedInstanceIds")
+        .is_none());
+
+    // Reappearing IDs remove their own tombstones, retaining other deletions.
+    decoder
+        .receive_packet(incoming(11, 9, 634, &relic_sync(88, 8), &key))
+        .unwrap();
+    let readded = decoder.state().build_scanner_export(&refs).unwrap();
+    assert_eq!(readded["relics"][0]["_uid"], relic_id);
+    assert_eq!(
+        readded["generator"]["deletedInstanceIds"]["relics"],
+        serde_json::json!([second_id])
+    );
+    // A fresh login resets tombstones along with its baseline.
+    for frame in frames(22, 600_000_001, SEED_B, "First") {
+        decoder.receive_packet(frame).unwrap();
+    }
+    let reset = decoder.state().build_scanner_export(&refs).unwrap();
+    assert!(reset["generator"].get("deletedInstanceIds").is_none());
+    assert_eq!(reset["relics"][0]["_uid"], relic_id);
+}
+
+#[test]
+fn destructive_sync_requires_verified_revision_direction_command_and_known_instance() {
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
+    decoder.enable_continuous();
+    configure(&mut decoder);
+    let key = session_key(SEED_A);
+    let mut login = frames(11, 600_000_001, SEED_A, "First").into_iter();
+    decoder.receive_packet(login.next().unwrap()).unwrap();
+    // A delta before the full bag does not establish data or a tombstone.
+    decoder
+        .receive_packet(incoming(11, 1, 634, &sync(&[88], &[77], true), &key))
+        .unwrap();
+    assert!(!decoder.state().has_items);
+    decoder
+        .receive_packet(incoming(11, 2, 65500, &roster(), &key))
+        .unwrap();
+    decoder
+        .receive_packet(incoming(11, 3, 65500, &bag(77, 80), &key))
+        .unwrap();
+    let original = decoder.state().build_scanner_export(&refs).unwrap();
+    decoder
+        .receive_packet(incoming(11, 4, 65500, &sync(&[88], &[77], true), &key))
+        .unwrap();
+    decoder.receive_command(&sync(&[88], &[77], true)).unwrap();
+    decoder
+        .receive_packet(command_frame(
+            11,
+            0,
+            634,
+            &sync(&[88], &[77], true),
+            &key,
+            PacketDirection::Sent,
+        ))
+        .unwrap();
+    // Unknown IDs and IDs from the other family never produce tombstones.
+    decoder
+        .receive_packet(incoming(
+            11,
+            5,
+            634,
+            &sync(&[77, 123456], &[88, 654321], false),
+            &key,
+        ))
+        .unwrap();
+    assert_eq!(
+        decoder.state().build_scanner_export(&refs).unwrap(),
+        original
+    );
+    assert!(
+        inventory_sync::deletions(Some(VERSION + 1), 634, &sync(&[88], &[77], true))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        inventory_sync::deletions(Some(VERSION), 674, &sync(&[88], &[77], true))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn malformed_verified_deletion_does_not_partially_mutate_inventory() {
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
+    decoder.enable_continuous();
+    configure(&mut decoder);
+    for frame in frames(11, 600_000_001, SEED_A, "First") {
+        decoder.receive_packet(frame).unwrap();
+    }
+    let original = decoder.state().build_scanner_export(&refs).unwrap();
+    let mut malformed = sync(&[88], &[], false);
+    malformed.extend(fields(|out| out.write_bytes(4, &[0x80]).unwrap()));
+    assert!(decoder
+        .receive_packet(incoming(11, 4, 634, &malformed, &session_key(SEED_A)))
+        .is_err());
+    assert_eq!(
+        decoder.state().build_scanner_export(&refs).unwrap(),
+        original
+    );
+    for body in [
+        fields(|out| out.write_uint64(15, u64::from(u32::MAX) + 1).unwrap()),
+        fields(|out| out.write_uint32(4, 0).unwrap()),
+        fields(|out| out.write_fixed32(15, 88).unwrap()),
+        fields(|out| out.write_uint32(99, 88).unwrap()),
+    ] {
+        assert!(inventory_sync::deletions(Some(VERSION), 634, &body).is_err());
+    }
+}
+
 #[test]
 fn normal_and_continuous_exports_share_verified_identity_and_opaque_item_ids() {
     let refs = crate::load_embedded_gilore_reference().unwrap();

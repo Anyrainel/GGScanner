@@ -24,6 +24,8 @@
       "files": {
         "Cargo.toml": "afbbd84648ddc0fa2c289c89efaea26e4b6c2bbe",
         "src/network/command/mod.rs": "5c3edd446b3ddfb871f905f2c48cd82d152ceba6",
+        "src/network/command/command_id.rs": "d02b7c597928d68e75213408285f9809a1e7b2da",
+        "src/network/command/proto/PlayerSyncScNotify.rs": "f0c6830480b23179286bb1ebfe09b6df98f59273",
         "src/network/command/proto/Avatar.rs": "7f12699048da5423ba3e6240d52dc9cd43639e87",
         "src/network/command/proto/AvatarPathData.rs": "9bfb3d15cc2e0e96945ae26ea05ae2cb87ab56dd",
         "src/network/command/proto/AvatarPathSkillTree.rs": "dfc2c1c0c0ef5c1081c518140ac298f835bf2c6a",
@@ -42,6 +44,14 @@
         "src/network/mod.rs": "0e2f8daeba82e5ec2b4e09eaf4ac25041ad5f465",
         "src/network/command/proto/PlayerLoginScRsp.rs": "bda036d50b453d50363555936040df88d01d9bd1",
         "src/network/command/proto/PlayerBasicInfo.rs": "a2cad16d32eb5a104cf59d877ed0af34c1c08e99"
+      }
+    },
+    {
+      "repository": "tawan475/teyvat.me-capture",
+      "reviewed_revision": "05a3bb8b0f8c02432c307ae43ba68277e2141206",
+      "files": {
+        "crates/protocol/src/lib.rs": "f0b4670de03923519f36f7049552b5c405b5e27c",
+        "crates/protocol/src/unk_util.rs": "5bd6b62d83e2a1e1143198817cc7c9007e1b0b14"
       }
     },
     {
@@ -69,7 +79,7 @@
     "experimental/hsr/src/network/connection.rs": "655a0eada653c1896baba7729ee2de50f6fcbf4f9117103caac4edec88a63e64",
     "experimental/hsr/src/network/crypto.rs": "6a6f7bc6fe90bb234280d806021643321fb2d156cdecd1ecfc78e161e6d65ce8",
     "experimental/hsr/src/network/kcp.rs": "4ff91d135a15daccca67ceeb77a9397083c1dcda5eeaec891289b8c8f771c39d",
-    "experimental/hsr/src/network/mod.rs": "a0019f1e98f01b0f5abbe548b2a5ec68a2b9c36077c97b6c4dd9ad1f1ff3ce9a",
+    "experimental/hsr/src/network/mod.rs": "db43c14f8673751055138a4759d678d6fe50d539bed17d6a8b09845ec933eff2",
     "experimental/hsr/src/packet_capture/proto/Avatar.rs": "0e48cb8726e7e9bc5efa9ac665e5cd473af7c0a9f897db9963ad1301f84b2528",
     "experimental/hsr/src/packet_capture/proto/AvatarPathData.rs": "50629494c144039ef20cbd43b34381b013c29915e5ceddbf7e4c55a2a987f58e",
     "experimental/hsr/src/packet_capture/proto/AvatarPathSkillTree.rs": "654c87d4a9fd0ce336d7fda698f3fbcafa5481e7d2720f002aa9cc028894a0c7",
@@ -79,6 +89,14 @@
     "experimental/hsr/src/packet_capture/proto/Relic.rs": "35c8e731606f1c609fa7d8a356fa9f5b1a4cad3efe81e12d195892cf0b667d0e",
     "experimental/hsr/src/packet_capture/proto/RelicAffix.rs": "51781661a10cd1e3267e5d3a2a5613f9e2feeffc799ae3fea70f19cac5984ebf",
     "experimental/hsr/src/network/identity.rs": "c92a84d91c63ecab7f13af30a77f19b9e7b96cc4ae68d1d9eaf807416f94c9a2",
-    "vendor/auto-artifactarium/src/identity.rs": "b66da037bc88be6e5a68af2ea0a30feb33eb885548b5d62f18ae1ffcffe7e3dd"
+    "vendor/auto-artifactarium/src/identity.rs": "b66da037bc88be6e5a68af2ea0a30feb33eb885548b5d62f18ae1ffcffe7e3dd",
+    "genshin/src/capture/mod.rs": "c6eb79a558e05ac4c02231ad9ef2aa5259b4670ac8b7f0c3b89dfe983c04e306",
+    "genshin/src/capture/inventory_updates.rs": "6e9fb078ba77fc361482494e0c8f11818e06931307abc933070c857478ff76b4",
+    "genshin/src/capture/monitor.rs": "48be04f640fcd02993b5af53dab1e4b29de5250502da4c8bf925b4c5fc0f1c40",
+    "genshin/src/capture/player_data.rs": "287791758493496d66a3c017af9690683ae5d8eb7dec5ea946251bfc890970a2",
+    "experimental/hsr/src/packet_capture/mod.rs": "84ecfe92ae0e1ebc7feda67b4696fc7086b6d2a09df454f0906b74375032dd1b",
+    "experimental/hsr/src/packet_capture/inventory.rs": "95c250e7acae5828021333835dc59fed3359ff69bf0388a39b4719e417ae0265",
+    "experimental/hsr/src/packet_capture/inventory_sync.rs": "4358c73d982f7e36b33e0a4244e9872fb356a0bbde5dc27918c37d446f8f440a",
+    "experimental/hsr/src/scanner_export.rs": "588ccebec6224f01ba1affbd8255e261b48c3022ef39b6d243e44f619a6720f4"
   }
 }
