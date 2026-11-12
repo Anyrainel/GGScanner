@@ -161,6 +161,8 @@ cargo build --locked --release -p good_tools_app --features capture --bin GGScan
 # target/release/GGScanner.exe
 ```
 
+本地 release 构建关闭 LTO 并启用增量编译，以加快重复构建。GitHub Actions 为 Windows 和 Linux 构建产物启用完整 LTO，并关闭增量编译。两种环境使用相同的构建命令和产物路径。
+
 本地构建默认使用构建当天 UTC 日期的前一天作为版本号（例如 10 月 9 日构建显示 `v2026.10.08`），并正常检查正式版更新。CI 发布时仍使用当天日期和发布构建编号。
 
 夹具与回放测试只能证明解析、导出及模拟交互契约，不能证明当前《星穹铁道》客户端上的实时扫描、抓包或管理操作已经通过实机验证。

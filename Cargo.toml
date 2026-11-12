@@ -12,6 +12,8 @@ exclude = ["vendor/auto-artifactarium"]
 auto-artifactarium = { path = "vendor/auto-artifactarium" }
 
 [profile.release]
-lto = true
+# Keep local release rebuilds fast; GitHub Actions overrides these for artifacts.
+lto = "off"
+incremental = true
 panic = "unwind"
 strip = true

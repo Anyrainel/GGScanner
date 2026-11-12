@@ -3,6 +3,9 @@
 ## Build Rules
 
 - When a running scanner executable locks a build output, the user authorizes stopping that scanner process before rebuilding and reopening it.
+- Local `cargo build --release` disables LTO and enables incremental compilation.
+  GitHub Actions explicitly enables full LTO and disables incremental compilation
+  for Windows and Linux artifacts; keep this split when changing build settings.
 
 ## Public Releases And Player-Facing Changes
 

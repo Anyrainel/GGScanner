@@ -155,6 +155,11 @@ cargo build --locked --release -p good_tools_app --features capture --bin GGScan
 # target/release/GGScanner.exe
 ```
 
+Local release builds disable LTO and enable incremental compilation for faster
+rebuilds. GitHub Actions enables full LTO and disables incremental compilation
+for both Windows and Linux artifacts. The build commands and output paths are
+the same in both environments.
+
 Fixtures and replay tests prove parser, export, and simulated-interaction behavior only. They do not prove live scanning, capture, or manager behavior against the current Star Rail client.
 
 ## Acknowledgments
