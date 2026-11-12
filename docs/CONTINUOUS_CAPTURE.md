@@ -2,7 +2,7 @@
 
 Available on both manager servers, including the OCR edition (which returns the
 `continuous_capture_disabled` error). In the Windows capture edition, enable
-**Continuous capture sync / 持续抓包同步** before starting the manager server, then
+**Continuous Sync (Capture) / 持续同步（抓包）** before starting the manager server, then
 log into the game. The listener runs until the server stops; OCR and manage jobs
 do not replace this separate packet snapshot. Existing origin and preflight
 rules apply. Responses use `Cache-Control: no-store`.

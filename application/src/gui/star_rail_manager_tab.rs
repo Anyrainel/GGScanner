@@ -65,7 +65,7 @@ pub fn show_status(
     widgets::server_port(ui, lang, &mut settings.manager_port, !running && !game_busy);
     #[cfg(all(feature = "capture", target_os = "windows"))]
     ui.add_enabled_ui(!running && !game_busy, |ui| {
-        ui.checkbox(&mut settings.continuous_capture, lang.t("持续抓包同步", "Continuous capture sync"))
+        ui.checkbox(&mut settings.continuous_capture, lang.t("持续同步（抓包）", "Continuous Sync (Capture)"))
             .on_hover_text(lang.t("启动服务器后持续接收游戏数据，每十分钟保存有变化的最新导出。请在登录游戏前启动。", "Receive game data while the server runs and save changed exports every ten minutes. Start before logging in."));
     });
     if running {
