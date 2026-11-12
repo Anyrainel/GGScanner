@@ -705,6 +705,8 @@ pub struct AppState {
     pub server_enabled: Arc<AtomicBool>,
     pub server_status: Arc<Mutex<TaskStatus>>,
     pub server_job: Arc<Mutex<genshin_scanner::manager::models::JobState>>,
+    #[cfg(all(feature = "capture", target_os = "windows"))]
+    pub server_capture_state: Arc<Mutex<genshin_scanner::capture::monitor::CaptureState>>,
     // --- Per-tab log buffers ---
     pub scanner_log_lines: Arc<LogStore>,
     pub manager_log_lines: Arc<LogStore>,
@@ -751,6 +753,8 @@ impl AppState {
             server_job: Arc::new(Mutex::new(
                 genshin_scanner::manager::models::JobState::idle(),
             )),
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            server_capture_state: Arc::new(Mutex::new(Default::default())),
             scanner_log_lines: Arc::new(LogStore::new(2000)),
             manager_log_lines: Arc::new(LogStore::new(2000)),
         }

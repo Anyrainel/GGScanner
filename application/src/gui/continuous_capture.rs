@@ -58,10 +58,12 @@ impl Session {
         }
     }
 
-    pub fn genshin(dir: PathBuf) -> Self {
+    pub fn genshin(
+        dir: PathBuf,
+        state: Arc<Mutex<genshin_scanner::capture::monitor::CaptureState>>,
+    ) -> Self {
         Self::spawn(move |latest, stop| {
             let runtime = tokio::runtime::Runtime::new()?;
-            let state = Arc::new(Mutex::new(Default::default()));
             let monitor = genshin_scanner::capture::monitor::CaptureMonitor::new(state, false)?;
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
             runtime.block_on(drive(
@@ -97,7 +99,8 @@ impl Session {
                 },
             )?
             .with_continuous(move |state| {
-                if observed_generation.replace(state.session_generation) != state.session_generation {
+                if observed_generation.replace(state.session_generation) != state.session_generation
+                {
                     observer.reset();
                 }
                 if let Some(error) = &state.error {

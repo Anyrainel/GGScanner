@@ -107,6 +107,17 @@ pub fn show_status(
             .on_hover_text(l.t("启动服务器后持续接收游戏数据，每十分钟保存有变化的最新导出。请在登录游戏前启动。", "Receive game data while the server runs and save changed exports every ten minutes. Start before logging in."));
     });
     if running {
+        #[cfg(all(feature = "capture", target_os = "windows"))]
+        if state.user_config.continuous_capture {
+            if let Some(uid) = state
+                .server_capture_state
+                .try_lock()
+                .ok()
+                .and_then(|s| s.uid)
+            {
+                ui.label(format!("UID: {uid}"));
+            }
+        }
         let stopping = handle.as_ref().is_some_and(TaskHandle::is_stopping);
         if super::theme::primary_action(
             ui,
@@ -137,6 +148,136 @@ pub fn show_status(
             state.server_enabled.store(true, Ordering::Relaxed);
             state.persist_config_now();
             *handle = Some(worker::spawn_server(state));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "capture", target_os = "windows"))]
+mod feedback_tests {
+    use super::*;
+    use crate::gui::state::{Lang, LogSource, TaskKind};
+    use std::time::{Duration, Instant};
+
+    fn rendered_text(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        handle: &mut Option<TaskHandle>,
+    ) -> Vec<(String, egui::Pos2)> {
+        fn collect(shape: &egui::Shape, texts: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    texts.push((text.galley.job.text.clone(), text.pos));
+                },
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| collect(shape, texts));
+                },
+                _ => {},
+            }
+        }
+
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(360.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        show_status(ui, state, handle, false, false);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            texts.clear();
+            for shape in output.shapes {
+                collect(&shape.shape, &mut texts);
+            }
+        }
+        texts
+    }
+
+    #[test]
+    fn recognized_uid_tracks_login_changes_above_the_running_manager_stop_button() {
+        for lang in [Lang::Zh, Lang::En] {
+            let ctx = egui::Context::default();
+            crate::gui::theme::setup(&ctx);
+            let mut state = AppState::new();
+            state.lang = lang;
+            state.user_config.continuous_capture = true;
+            let (release, receiver) = std::sync::mpsc::channel::<()>();
+            let mut handle = Some(worker::spawn_cancellable_task(
+                TaskKind::Manager,
+                LogSource::Manager,
+                state.server_status.clone(),
+                UiText::new("服务器运行中", "Server running"),
+                UiText::new("正在停止服务器", "Stopping server"),
+                move |_| {
+                    // Exercise a real running TaskHandle without opening a
+                    // listener or touching the game. Dropping the sender wakes
+                    // the worker even if an assertion unwinds this test.
+                    let _ = receiver.recv_timeout(Duration::from_secs(5));
+                    Ok(TaskStatus::Completed(UiText::new(
+                        "服务器已停止",
+                        "Server stopped",
+                    )))
+                },
+            ));
+
+            let initial = rendered_text(&ctx, &mut state, &mut handle);
+            assert!(initial
+                .iter()
+                .any(|(text, _)| text == lang.t("停止服务器", "Stop server")));
+            assert!(!initial.iter().any(|(text, _)| text.starts_with("UID:")));
+
+            for uid in [Some(800_000_001), None, Some(800_000_002)] {
+                state.server_capture_state.lock().unwrap().uid = uid;
+                let texts = rendered_text(&ctx, &mut state, &mut handle);
+                let stop = texts
+                    .iter()
+                    .find(|(text, _)| text == lang.t("停止服务器", "Stop server"))
+                    .expect("the running manager keeps its stop action")
+                    .1;
+                match uid {
+                    Some(uid) => {
+                        let identity = texts
+                            .iter()
+                            .find(|(text, _)| text == &format!("UID: {uid}"))
+                            .expect("the currently recognized UID is visible")
+                            .1;
+                        assert!(identity.y < stop.y, "UID belongs above the stop action");
+                        assert_eq!(
+                            texts
+                                .iter()
+                                .filter(|(text, _)| text.starts_with("UID:"))
+                                .count(),
+                            1,
+                            "old account identities must disappear"
+                        );
+                    },
+                    None => assert!(!texts.iter().any(|(text, _)| text.starts_with("UID:"))),
+                }
+            }
+
+            state.user_config.continuous_capture = false;
+            let disabled = rendered_text(&ctx, &mut state, &mut handle);
+            assert!(!disabled.iter().any(|(text, _)| text.starts_with("UID:")));
+            state.user_config.continuous_capture = true;
+            let stopped = rendered_text(&ctx, &mut state, &mut None);
+            assert!(!stopped.iter().any(|(text, _)| text.starts_with("UID:")));
+
+            drop(release);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !handle.as_ref().unwrap().is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the harmless test worker must exit"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 }

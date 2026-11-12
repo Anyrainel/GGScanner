@@ -71,6 +71,8 @@ pub struct CaptureState {
     pub complete: bool,
     /// Actual token response recognized by the transport; independent of inventory.
     pub has_key_exchange: bool,
+    /// Verified game UID for this login, available before the initial inventory.
+    pub uid: Option<u32>,
     pub has_characters: bool,
     pub has_items: bool,
     pub has_achievements: bool,
@@ -94,6 +96,7 @@ impl Default for CaptureState {
             capturing: false,
             complete: false,
             has_key_exchange: false,
+            uid: None,
             has_characters: false,
             has_items: false,
             has_achievements: false,
@@ -428,6 +431,7 @@ impl CaptureMonitor {
                 // same UID. Never attach old inventory to a new identity.
                 self.reset_login();
                 self.player_data.set_uid(command.account_uid);
+                self.state.lock().expect("capture state poisoned").uid = command.account_uid;
                 if command.account_uid.is_none() {
                     log_warn!(
                         "登录响应中的游戏 UID 无法验证，请更新扫描器后重新登录。",
@@ -1848,10 +1852,12 @@ mod tests {
     #[test]
     fn continuous_uid_comes_from_incoming_login_before_inventory_is_published() {
         let (mut monitor, latest) = identity_test_monitor();
+        let shared = monitor.state.clone();
         let (items, avatars) = identity_inventory(1000);
         monitor.process_packet(identity_kcp_frame(11, 0, &items, true));
         monitor.process_packet(identity_kcp_frame(11, 1, &avatars, true));
         assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(shared.lock().unwrap().uid, None);
         assert_eq!(
             crate::continuous::ContinuousCapture::response(Some(&latest)).0,
             503
@@ -1873,6 +1879,7 @@ mod tests {
             true,
         ));
         assert_eq!(monitor.player_data.uid(), Some(800_000_001));
+        assert_eq!(shared.lock().unwrap().uid, Some(800_000_001));
         assert!(monitor.sniffer.key_exchange_captured());
         assert_eq!(monitor.player_data.character_count(), 0);
         assert_eq!(monitor.player_data.weapon_count(), 0);
@@ -1903,13 +1910,16 @@ mod tests {
     #[test]
     fn continuous_account_switches_and_same_uid_reconnects_reset_identity_and_inventory() {
         let (mut monitor, latest) = identity_test_monitor();
+        let shared = monitor.state.clone();
         identity_begin_login(&mut monitor, 11, 800_000_001);
+        assert_eq!(shared.lock().unwrap().uid, Some(800_000_001));
         identity_publish_inventory(&mut monitor, 11, 1000);
         let first = crate::continuous::ContinuousCapture::response(Some(&latest)).1;
         assert_eq!(first["data"]["metadata"]["uid"], "800000001");
 
         monitor.process_packet(identity_control_frame(0xff, None, false));
         assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(shared.lock().unwrap().uid, None);
         assert_eq!(monitor.player_data.character_count(), 0);
         assert_eq!(monitor.player_data.artifact_count(), 0);
         assert_eq!(
@@ -1934,6 +1944,7 @@ mod tests {
         let (old_items, _) = identity_inventory(1000);
         monitor.process_packet(identity_kcp_frame(11, 4, &old_items, true));
         assert_eq!(monitor.player_data.uid(), Some(800_000_002));
+        assert_eq!(shared.lock().unwrap().uid, Some(800_000_002));
         assert_eq!(monitor.player_data.weapon_count(), 0);
         identity_publish_inventory(&mut monitor, 22, 2000);
         let (status, second) = crate::continuous::ContinuousCapture::response(Some(&latest));
@@ -1962,6 +1973,14 @@ mod tests {
         assert_eq!(reconnected["revision"], 1);
         assert_eq!(reconnected["data"]["metadata"]["uid"], "800000002");
         assert_eq!(reconnected["data"]["weapons"].as_array().unwrap().len(), 6);
+
+        monitor.process_packet(identity_control_frame(404, Some(33), true));
+        assert_eq!(shared.lock().unwrap().uid, None);
+        assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(
+            crate::continuous::ContinuousCapture::response(Some(&latest)).0,
+            503
+        );
     }
 
     #[test]
@@ -1976,6 +1995,7 @@ mod tests {
 
         identity_begin_login(&mut monitor, 22, 0);
         assert_eq!(monitor.player_data.uid(), None);
+        assert_eq!(monitor.state.lock().unwrap().uid, None);
         identity_publish_inventory(&mut monitor, 22, 2000);
         let (status, body) = crate::continuous::ContinuousCapture::response(Some(&latest));
         assert_eq!(status, 503);

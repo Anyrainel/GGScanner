@@ -1059,6 +1059,12 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
     let port = state.server_port;
     #[cfg(all(feature = "capture", target_os = "windows"))]
     let continuous_dir = std::path::PathBuf::from(&state.output_dir);
+    #[cfg(all(feature = "capture", target_os = "windows"))]
+    let continuous_state = {
+        let shared = state.server_capture_state.clone();
+        *shared.lock().expect("capture state poisoned") = Default::default();
+        shared
+    };
     let enabled = state.server_enabled.clone();
     // GUI management always filters target sets. The legacy CLI preference
     // remains available to command-line callers, but is not a GUI setting.
@@ -1134,9 +1140,9 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
             });
 
             #[cfg(all(feature = "capture", target_os = "windows"))]
-            let continuous_session = user_config
-                .continuous_capture
-                .then(|| super::continuous_capture::Session::genshin(continuous_dir));
+            let continuous_session = user_config.continuous_capture.then(|| {
+                super::continuous_capture::Session::genshin(continuous_dir, continuous_state)
+            });
             #[cfg(all(feature = "capture", target_os = "windows"))]
             let continuous = continuous_session
                 .as_ref()
