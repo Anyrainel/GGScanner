@@ -3,7 +3,7 @@ use super::*;
 use crate::network::tests::{command_frame, session_key};
 use protobuf::{CodedOutputStream, Message};
 
-const VERSION: u32 = 2_920_436_228;
+const VERSION: u32 = 2_766_937_619;
 const SEED_A: u64 = 0x1234567890;
 const SEED_B: u64 = 0x2345678901;
 
@@ -29,8 +29,8 @@ fn fields(write: impl FnOnce(&mut CodedOutputStream<'_>)) -> Vec<u8> {
 
 fn token(uid: u32, seed: u64) -> Vec<u8> {
     fields(|out| {
-        out.write_uint64(12, seed).unwrap();
-        out.write_uint32(15, uid).unwrap();
+        out.write_uint64(9, seed).unwrap();
+        out.write_uint32(10, uid).unwrap();
     })
 }
 
@@ -39,7 +39,7 @@ fn login(nickname: &str) -> Vec<u8> {
         out.write_string(1, nickname).unwrap();
         out.write_uint32(2, 70).unwrap();
     });
-    fields(|out| out.write_bytes(4, &basic).unwrap())
+    fields(|out| out.write_bytes(10, &basic).unwrap())
 }
 
 fn roster() -> Vec<u8> {
@@ -103,8 +103,8 @@ fn incoming(conv: u32, sequence: u32, id: u16, body: &[u8], key: &[u8]) -> Vec<u
 fn frames(conv: u32, uid: u32, seed: u64, nickname: &str) -> Vec<Vec<u8>> {
     let key = session_key(seed);
     vec![
-        incoming(conv, 0, 16, &token(uid, seed), &dispatch_key()),
-        incoming(conv, 1, 25, &login(nickname), &key),
+        incoming(conv, 0, 71, &token(uid, seed), &dispatch_key()),
+        incoming(conv, 1, 19, &login(nickname), &key),
         incoming(conv, 2, 65500, &roster(), &key),
         incoming(conv, 3, 65500, &bag(77, 80), &key),
     ]
@@ -133,14 +133,14 @@ fn targets() -> CaptureTargets {
 fn sync(relics: &[u32], cones: &[u32], packed: bool) -> Vec<u8> {
     fields(|out| {
         if packed {
-            out.write_repeated_packed_uint32(15, relics).unwrap();
-            out.write_repeated_packed_uint32(4, cones).unwrap();
+            out.write_repeated_packed_uint32(10, relics).unwrap();
+            out.write_repeated_packed_uint32(11, cones).unwrap();
         } else {
             for id in relics {
-                out.write_uint32(15, *id).unwrap();
+                out.write_uint32(10, *id).unwrap();
             }
             for id in cones {
-                out.write_uint32(4, *id).unwrap();
+                out.write_uint32(11, *id).unwrap();
             }
         }
     })
@@ -155,7 +155,7 @@ fn relic_sync(id: u32, level: u32) -> Vec<u8> {
         ..Default::default()
     };
     fields(|out| {
-        out.write_bytes(5, &relic.write_to_bytes().unwrap())
+        out.write_bytes(2, &relic.write_to_bytes().unwrap())
             .unwrap()
     })
 }
@@ -176,7 +176,7 @@ fn verified_sync_replaces_gear_and_keeps_cumulative_deletions_until_login_reset(
     // The same instance is replaced, while a new instance appends.
     for (sequence, id, level) in [(4, 88, 0), (5, 88, 4), (6, 89, 8)] {
         decoder
-            .receive_packet(incoming(11, sequence, 634, &relic_sync(id, level), &key))
+            .receive_packet(incoming(11, sequence, 674, &relic_sync(id, level), &key))
             .unwrap();
     }
     let upgraded = decoder.state().build_scanner_export(&refs).unwrap();
@@ -187,7 +187,7 @@ fn verified_sync_replaces_gear_and_keeps_cumulative_deletions_until_login_reset(
     let mut upgrade_and_consume = relic_sync(89, 12);
     upgrade_and_consume.extend(sync(&[88], &[], true));
     decoder
-        .receive_packet(incoming(11, 7, 634, &upgrade_and_consume, &key))
+        .receive_packet(incoming(11, 7, 674, &upgrade_and_consume, &key))
         .unwrap();
     let consumed = decoder.state().build_scanner_export(&refs).unwrap();
     assert_eq!(consumed["relics"].as_array().unwrap().len(), 1);
@@ -195,7 +195,7 @@ fn verified_sync_replaces_gear_and_keeps_cumulative_deletions_until_login_reset(
     assert_eq!(consumed["relics"][0]["level"], 12);
     // A client can miss the first deletion and still receive both later.
     decoder
-        .receive_packet(incoming(11, 8, 634, &sync(&[89], &[77], false), &key))
+        .receive_packet(incoming(11, 8, 674, &sync(&[89], &[77], false), &key))
         .unwrap();
     let empty = decoder.state().build_scanner_export(&refs).unwrap();
     assert!(decoder.state().complete);
@@ -227,7 +227,7 @@ fn verified_sync_replaces_gear_and_keeps_cumulative_deletions_until_login_reset(
 
     // Reappearing IDs remove their own tombstones, retaining other deletions.
     decoder
-        .receive_packet(incoming(11, 9, 634, &relic_sync(88, 8), &key))
+        .receive_packet(incoming(11, 9, 674, &relic_sync(88, 8), &key))
         .unwrap();
     let readded = decoder.state().build_scanner_export(&refs).unwrap();
     assert_eq!(readded["relics"][0]["_uid"], relic_id);
@@ -255,7 +255,7 @@ fn destructive_sync_requires_verified_revision_direction_command_and_known_insta
     decoder.receive_packet(login.next().unwrap()).unwrap();
     // A delta before the full bag does not establish data or a tombstone.
     decoder
-        .receive_packet(incoming(11, 1, 634, &sync(&[88], &[77], true), &key))
+        .receive_packet(incoming(11, 1, 674, &sync(&[88], &[77], true), &key))
         .unwrap();
     assert!(!decoder.state().has_items);
     decoder
@@ -273,7 +273,7 @@ fn destructive_sync_requires_verified_revision_direction_command_and_known_insta
         .receive_packet(command_frame(
             11,
             0,
-            634,
+            674,
             &sync(&[88], &[77], true),
             &key,
             PacketDirection::Sent,
@@ -284,7 +284,7 @@ fn destructive_sync_requires_verified_revision_direction_command_and_known_insta
         .receive_packet(incoming(
             11,
             5,
-            634,
+            674,
             &sync(&[77, 123456], &[88, 654321], false),
             &key,
         ))
@@ -294,12 +294,12 @@ fn destructive_sync_requires_verified_revision_direction_command_and_known_insta
         original
     );
     assert!(
-        inventory_sync::deletions(Some(VERSION + 1), 634, &sync(&[88], &[77], true))
+        inventory_sync::deletions(Some(VERSION + 1), 674, &sync(&[88], &[77], true))
             .unwrap()
             .is_none()
     );
     assert!(
-        inventory_sync::deletions(Some(VERSION), 674, &sync(&[88], &[77], true))
+        inventory_sync::deletions(Some(VERSION), 634, &sync(&[88], &[77], true))
             .unwrap()
             .is_none()
     );
@@ -316,21 +316,21 @@ fn malformed_verified_deletion_does_not_partially_mutate_inventory() {
     }
     let original = decoder.state().build_scanner_export(&refs).unwrap();
     let mut malformed = sync(&[88], &[], false);
-    malformed.extend(fields(|out| out.write_bytes(4, &[0x80]).unwrap()));
+    malformed.extend(fields(|out| out.write_bytes(11, &[0x80]).unwrap()));
     assert!(decoder
-        .receive_packet(incoming(11, 4, 634, &malformed, &session_key(SEED_A)))
+        .receive_packet(incoming(11, 4, 674, &malformed, &session_key(SEED_A)))
         .is_err());
     assert_eq!(
         decoder.state().build_scanner_export(&refs).unwrap(),
         original
     );
     for body in [
-        fields(|out| out.write_uint64(15, u64::from(u32::MAX) + 1).unwrap()),
-        fields(|out| out.write_uint32(4, 0).unwrap()),
-        fields(|out| out.write_fixed32(15, 88).unwrap()),
+        fields(|out| out.write_uint64(10, u64::from(u32::MAX) + 1).unwrap()),
+        fields(|out| out.write_uint32(11, 0).unwrap()),
+        fields(|out| out.write_fixed32(10, 88).unwrap()),
         fields(|out| out.write_uint32(99, 88).unwrap()),
     ] {
-        assert!(inventory_sync::deletions(Some(VERSION), 634, &body).is_err());
+        assert!(inventory_sync::deletions(Some(VERSION), 674, &body).is_err());
     }
 }
 
@@ -388,6 +388,132 @@ fn normal_and_continuous_exports_share_verified_identity_and_opaque_item_ids() {
 }
 
 #[test]
+fn current_4_7_raw_baseline_uses_the_bundled_dispatch_key_and_current_reference() {
+    use sha2::Digest;
+    // Explicit primary 4.7 tags, independent of the generated record writers.
+    // Reliquary ba9319be: GetAvatarData319(path7/base8/all15), Bag519(cone9/relic11).
+    let base = fields(|out| {
+        out.write_uint32(13, 1511).unwrap();
+        out.write_uint32(10, 80).unwrap();
+        out.write_uint32(6, 6).unwrap();
+        out.write_uint64(4, 1_700_000_000).unwrap();
+    });
+    let node = fields(|out| {
+        out.write_uint32(3, 1).unwrap();
+        out.write_uint32(5, 6).unwrap();
+    });
+    let path = fields(|out| {
+        out.write_uint32(1, 1511).unwrap();
+        out.write_bytes(2, &node).unwrap();
+        out.write_uint32(10, 2).unwrap();
+        out.write_repeated_packed_uint32(8, &[1]).unwrap(); // ExRankList is separate.
+    });
+    let roster = fields(|out| {
+        out.write_bytes(7, &path).unwrap();
+        out.write_bytes(8, &base).unwrap();
+        out.write_bool(15, true).unwrap();
+    });
+    let cone = fields(|out| {
+        out.write_uint32(1, 6).unwrap();
+        out.write_uint32(2, 23065).unwrap();
+        out.write_uint32(3, 80).unwrap();
+        out.write_uint32(4, 1).unwrap();
+        out.write_uint32(6, 77).unwrap();
+        out.write_bool(8, true).unwrap();
+        out.write_uint32(12, 1511).unwrap();
+    });
+    let relic = fields(|out| {
+        out.write_bool(1, true).unwrap();
+        out.write_uint32(6, 15).unwrap();
+        out.write_uint32(7, 1511).unwrap();
+        out.write_bool(8, true).unwrap();
+        out.write_uint32(12, 1).unwrap();
+        out.write_uint32(13, 63295).unwrap();
+        out.write_uint32(15, 88).unwrap();
+    });
+    let bag = fields(|out| {
+        out.write_bytes(9, &cone).unwrap();
+        out.write_bytes(11, &relic).unwrap();
+    });
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let keys = load_embedded_dispatch_keys().unwrap();
+    let dispatch = keys.get(&VERSION).unwrap();
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(dispatch)),
+        "4f25f94bf7e5ee986602a08cc3e06806aa933312022df415e3add67d259fd03c"
+    );
+    for continuous in [false, true] {
+        let mut selected = targets();
+        selected.achievements = !continuous;
+        let mut decoder = HsrPacketDecoder::new(refs.clone(), selected).unwrap();
+        if continuous {
+            decoder.enable_continuous();
+        }
+        let key = session_key(SEED_A);
+        for frame in [
+            incoming(11, 0, 71, &token(600_000_001, SEED_A), dispatch),
+            incoming(11, 1, 19, &login("Current Captain"), &key),
+            incoming(11, 2, 319, &roster, &key),
+            incoming(11, 3, 519, &bag, &key),
+        ] {
+            decoder.receive_packet(frame).unwrap();
+        }
+        if !continuous {
+            assert!(
+                !decoder.state().complete,
+                "default one-time capture waits for Quests"
+            );
+            let quests = fields(|out| {
+                for id in 4_010_101..4_010_107 {
+                    let record = fields(|out| {
+                        out.write_uint32(11, id).unwrap();
+                        out.write_uint32(3, 3).unwrap();
+                        out.write_uint32(8, 1).unwrap();
+                        out.write_uint64(10, 1_700_000_000).unwrap();
+                        out.write_repeated_packed_uint32(7, &[1, 2]).unwrap();
+                    });
+                    out.write_bytes(9, &record).unwrap();
+                }
+            });
+            decoder
+                .receive_packet(incoming(11, 4, 919, &quests, &key))
+                .unwrap();
+        }
+        let export = decoder.state().build_scanner_export(&refs).unwrap();
+        assert_eq!(export["metadata"]["uid"], 600_000_001);
+        assert_eq!(export["metadata"]["nickname"], "Current Captain");
+        assert_eq!(export["characters"][0]["id"], "1511");
+        assert_eq!(export["characters"][0]["eidolon"], 2);
+        assert_eq!(export["light_cones"][0]["id"], "23065");
+        assert_eq!(export["light_cones"][0]["location"], "1511");
+        assert_eq!(export["relics"][0]["set_id"], "329");
+        assert_eq!(export["relics"][0]["location"], "1511");
+        assert_eq!(export["relics"][0]["discard"], true);
+        assert_eq!(export["generator"]["itemIdentity"], "account-instance-v1");
+        if !continuous {
+            assert_eq!(export["quests"]["records"].as_array().unwrap().len(), 6);
+        }
+        if continuous {
+            let mut deleted = sync(&[88], &[77], true);
+            deleted.extend(fields(|out| {
+                for field in [
+                    2, 3, 4, 6, 7, 8, 9, 12, 14, 220, 305, 425, 542, 1084, 1533, 1606, 2020, 2039,
+                ] {
+                    out.write_bytes(field, &[]).unwrap();
+                }
+            }));
+            decoder
+                .receive_packet(incoming(11, 4, 674, &deleted, &key))
+                .unwrap();
+            let empty = decoder.state().build_scanner_export(&refs).unwrap();
+            assert_eq!(empty["light_cones"], serde_json::json!([]));
+            assert_eq!(empty["relics"], serde_json::json!([]));
+            assert_eq!(empty["metadata"]["uid"], 600_000_001);
+        }
+    }
+}
+
+#[test]
 fn new_account_retires_old_conversation_and_requires_fresh_baseline() {
     let refs = crate::load_embedded_gilore_reference().unwrap();
     let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
@@ -432,7 +558,7 @@ fn new_account_retires_old_conversation_and_requires_fresh_baseline() {
         .receive_packet(incoming(
             11,
             5,
-            25,
+            19,
             &login("Delayed First"),
             &session_key(SEED_A),
         ))
@@ -468,7 +594,7 @@ fn outgoing_or_unreviewed_identity_is_never_attached_to_an_inventory() {
         .receive_packet(command_frame(
             11,
             0,
-            16,
+            71,
             &token(600_000_001, SEED_A),
             &dispatch_key(),
             PacketDirection::Sent,
@@ -536,11 +662,11 @@ fn identified_disconnect_then_unreviewed_login_cannot_export_or_reuse_old_uid() 
     assert_eq!(decoder.state().export_details.uid, None);
     decoder.receive_packet(connection_frame(325, 22)).unwrap();
     decoder
-        .receive_packet(incoming(22, 0, 16, &token(600_000_002, SEED_B), &[0; 4096]))
+        .receive_packet(incoming(22, 0, 71, &token(600_000_002, SEED_B), &[0; 4096]))
         .unwrap();
     let key = session_key(SEED_B);
     decoder
-        .receive_packet(incoming(22, 1, 25, &login("Unreviewed"), &key))
+        .receive_packet(incoming(22, 1, 19, &login("Unreviewed"), &key))
         .unwrap();
     decoder
         .receive_packet(incoming(22, 2, 65500, &roster(), &key))
@@ -576,7 +702,7 @@ fn unreviewed_login_without_a_handshake_invalidates_the_previous_account() {
     // pktmon can miss establishment; a decoded new seed still proves that the
     // previous inventory no longer belongs to the active login.
     decoder
-        .receive_packet(incoming(22, 0, 16, &token(600_000_002, SEED_B), &[0; 4096]))
+        .receive_packet(incoming(22, 0, 71, &token(600_000_002, SEED_B), &[0; 4096]))
         .unwrap();
     assert!(decoder.state().session_generation > generation);
     assert_eq!(decoder.state().export_details.uid, None);
@@ -625,7 +751,7 @@ fn normal_and_continuous_monitors_report_unverified_identity_instead_of_success(
                 GameSniffer::new().set_initial_keys(monitor.decoder.dispatch_keys.clone());
             monitor.started = Some(tokio::time::Instant::now());
             let uid = if reviewed_revision { 0 } else { 600_000_001 };
-            monitor.handle_packet(incoming(11, 0, 16, &token(uid, SEED_A), &dispatch));
+            monitor.handle_packet(incoming(11, 0, 71, &token(uid, SEED_A), &dispatch));
             let key = session_key(SEED_A);
             monitor.handle_packet(incoming(11, 1, 65500, &roster(), &key));
             monitor.handle_packet(incoming(11, 2, 65500, &bag(77, 80), &key));
@@ -669,7 +795,7 @@ fn a_batched_unverified_login_and_inventory_clears_shared_identity_before_error(
     assert_eq!(shared.lock().unwrap().export_details.uid, Some(600_000_001));
     let key = session_key(SEED_B);
     let frames = [
-        incoming(22, 0, 16, &token(0, SEED_B), &dispatch_key()),
+        incoming(22, 0, 71, &token(0, SEED_B), &dispatch_key()),
         incoming(22, 1, 65500, &roster(), &key),
         incoming(22, 2, 65500, &bag(77, 70), &key),
     ];

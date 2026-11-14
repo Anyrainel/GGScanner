@@ -5,17 +5,17 @@ use protobuf::CodedOutputStream;
 fn record(id: u32, status: u32, packed: bool) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut out = CodedOutputStream::vec(&mut bytes);
-    out.write_uint32(12, id).unwrap();
+    out.write_uint32(11, id).unwrap();
     if status != 0 {
-        out.write_uint32(1, status).unwrap();
+        out.write_uint32(3, status).unwrap();
     }
-    out.write_uint32(14, 100).unwrap();
-    out.write_uint64(3, 1700000000).unwrap();
+    out.write_uint32(8, 100).unwrap();
+    out.write_uint64(10, 1700000000).unwrap();
     if packed {
-        out.write_bytes(10, &[1, 2, 3]).unwrap();
+        out.write_bytes(7, &[1, 2, 3]).unwrap();
     } else {
-        out.write_uint32(10, 1).unwrap();
-        out.write_uint32(10, 2).unwrap();
+        out.write_uint32(7, 1).unwrap();
+        out.write_uint32(7, 2).unwrap();
     }
     out.flush().unwrap();
     drop(out);
@@ -25,7 +25,7 @@ fn response(records: Vec<Vec<u8>>) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut out = CodedOutputStream::vec(&mut bytes);
     for record in records {
-        out.write_bytes(10, &record).unwrap();
+        out.write_bytes(9, &record).unwrap();
     }
     out.flush().unwrap();
     drop(out);

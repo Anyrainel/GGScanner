@@ -226,3 +226,53 @@ Validation passed 343 Genshin tests (4 ignored), 218 Star Rail tests, 21 app
 shared-game integration tests, 18 GUI feedback tests and 11 capture-checker
 tests. The production-feature Windows scanner binaries pass `cargo check`;
 changed Rust files pass formatting and all 35 reviewed local fingerprints match.
+
+## Current Star Rail 4.7 protocol and reference — 2026-11-14
+
+Reviewed Reliquary v25.0.0 commit
+[`ba9319be47e406ef5bf52c6b7b04b859c65a8026`](https://github.com/IceDynamix/reliquary/tree/ba9319be47e406ef5bf52c6b7b04b859c65a8026),
+whose change updates the protocol to 4.7. This supersedes the earlier 4.6-only
+identity/inventory limitation. The seven local generated record types match the
+primary files exactly; `AvatarPathData.ExRankList` remains separate from normal
+Eidolon rank. Initial roster command 319 uses path field 7, base field 8 and
+`is_get_all` field 15; bag command 519 uses equipment field 9 and relic field 11.
+
+The token is command 71: seed field 9, UID field 10, success return code 11.
+Login is command 19: basic info field 10 and success return code 4. Basic info's
+nickname field 1 and level field 2 are unchanged. These layouts require the
+reviewed 4.7 dispatch selector `2766937619`; historical keys cannot authorize
+4.7 identity or deletions. The new 4096-byte public key comes from this revision's
+[`src/network/crypto.rs`](https://github.com/IceDynamix/reliquary/blob/ba9319be47e406ef5bf52c6b7b04b859c65a8026/src/network/crypto.rs),
+with decoded SHA-256
+`4f25f94bf7e5ee986602a08cc3e06806aa933312022df415e3add67d259fd03c`.
+All 31 older bundled keys are retained unchanged. StarDB's current table still
+has only those 31 entries, so key freshness now checks both immutable StarDB and
+Reliquary revisions and rejects disagreements or unrecognized Rust key arms.
+
+Continuous sync command 674 uses relic records at 2, equipment at 3, relic
+deletions at 10 and equipment deletions at 11. Explicit packed/unpacked positive
+instance IDs remain required. The strict message-field allowlist is copied from
+the reviewed notification; absent inventory alone still does not imply deletion.
+Quest response 919 uses success field 4 and record field 9; record ID/status/
+progress/finish-time/counter tags are 11/3/8/10/7. Finish times remain excluded.
+
+The existing embedded-reference generator was run against HoyoData's verified
+2.1.0 bundle from producer `0e63fc8fce3e00d1dadef9c695e121e89644aeca`, source
+`dfdfe3337bcfa14f000074d2dae7058118193ea6` (4.7). The fallback includes all
+99 characters, 172 Light Cones and 790 Relic variants in the current shared
+reference, plus 1,993 achievement IDs. Packet-affix tables are semantically
+unchanged and carry the same refreshed source provenance.
+
+Synthetic fully framed regressions use the actual bundled 4.7 dispatch key and
+manually authored primary wire tags, including current character 1511, Light
+Cone 23065 and Planar Ornament 63295. They cover one-time capture with Quests,
+continuous capture, account identity and explicit deletions. No fresh live-game
+login is claimed by these tests. Publish the updated website shared reference
+before releasing the scanner; online cache/refresh behavior remains unchanged,
+while the regenerated embedded reference supports cold offline startup.
+
+Validation passed 219 Star Rail tests, 21 shared-game app integration tests,
+18 Python capture-checker tests, production-feature binary `cargo check`, the
+embedded generator's byte-for-byte `--check`, live verification of both key
+sources, Rust formatting and all 35 reviewed local source fingerprints. Embedded
+and current website reference IDs match exactly across all three inventory families.

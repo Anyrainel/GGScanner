@@ -11,8 +11,11 @@ decryption, token exchange and protocol-source drift. Its read-only
 `scripts/check_capture_upstreams.py` complements this dispatch-table check.
 
 Run `uv run --no-project python scripts/check_capture_keys.py` to compare the
-working tree with StarDB Exporter's current public GI and HSR key tables. The
-checker resolves `master` once and fetches both files at that immutable commit.
+working tree with StarDB Exporter's current public GI/HSR key tables and
+Reliquary's HSR dispatch-key table in `src/network/crypto.rs`. The checker
+resolves each source branch once and fetches files at those immutable commits.
+It strictly parses the reviewed Rust string/`concat!` key arms and merges both
+HSR tables; unsupported expressions or conflicting selector values fail closed.
 It validates key identifiers, base64 and 4096-byte key lengths. Missing or changed
 upstream entries fail; historical local-only entries are preserved. It never
 prints key material, modifies files, stages changes or publishes builds.

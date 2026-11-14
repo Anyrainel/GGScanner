@@ -1,4 +1,4 @@
-//! Decode the reviewed 4.6 GetQuestDataScRsp schema, without a public ID allowlist.
+//! Decode the reviewed 4.7 GetQuestDataScRsp schema, without a public ID allowlist.
 //! Source: IceDynamix/reliquary, src/network/command/proto/{Quest,GetQuestDataScRsp}.rs.
 //! Status, progress and packed counters are public Quest state. Completion times
 //! and raw packets are never retained in this export.
@@ -10,21 +10,21 @@ pub fn decode_quest_command(bytes: &[u8]) -> HsrResult<Option<Vec<ObservedQuest>
     let Some(fields) = parse_message(bytes) else {
         return Ok(None);
     };
-    // Full response: retcode field 8 and repeated Quest field 10. Other response
+    // Full response: retcode field 4 and repeated Quest field 9. Other response
     // types and incremental Quest updates must not become complete snapshots.
-    if fields.iter().any(|field| !matches!(field.number, 8 | 10)) {
+    if fields.iter().any(|field| !matches!(field.number, 4 | 9)) {
         return Ok(None);
     }
     let records = fields
         .iter()
-        .filter(|field| field.number == 10)
+        .filter(|field| field.number == 9)
         .collect::<Vec<_>>();
     if records.len() < 5 {
         return Ok(None);
     }
     if fields
         .iter()
-        .any(|field| field.number == 8 && !matches!(field.value, WireValue::Varint(0)))
+        .any(|field| field.number == 4 && !matches!(field.value, WireValue::Varint(0)))
     {
         return Ok(None);
     }
@@ -70,19 +70,19 @@ fn decode_quest(bytes: &[u8]) -> Option<ObservedQuest> {
     };
     for field in fields {
         match (field.number, field.value) {
-            (1 | 3 | 12 | 14, WireValue::Varint(value)) => {
+            (3 | 8 | 10 | 11, WireValue::Varint(value)) => {
                 if !scalar_tags.insert(field.number) {
                     return None;
                 }
                 match field.number {
-                    1 => quest.status = u32::try_from(value).ok()?,
-                    12 => quest.id = u32::try_from(value).ok()?,
-                    14 => quest.progress = u32::try_from(value).ok()?,
+                    3 => quest.status = u32::try_from(value).ok()?,
+                    11 => quest.id = u32::try_from(value).ok()?,
+                    8 => quest.progress = u32::try_from(value).ok()?,
                     _ => (), // Completion timestamp intentionally discarded.
                 }
             },
-            (10, WireValue::Varint(value)) => quest.counters.push(u32::try_from(value).ok()?),
-            (10, WireValue::Bytes(bytes)) => {
+            (7, WireValue::Varint(value)) => quest.counters.push(u32::try_from(value).ok()?),
+            (7, WireValue::Bytes(bytes)) => {
                 let mut cursor = 0;
                 while cursor < bytes.len() {
                     quest

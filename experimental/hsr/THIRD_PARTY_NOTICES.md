@@ -12,15 +12,15 @@ v23.0.0, commit `d5cf3b7e7e66470d2d8efff6676aa18762b21d3b` (2026-08-28,
 HSR 4.5). Its MIT license is reproduced in `LICENSE-reliquary.txt`.
 
 The seven inventory record types under `src/packet_capture/proto/` are sourced
-from [Reliquary v24.0.0 / HSR 4.6](https://github.com/IceDynamix/reliquary/tree/0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38),
-revision `0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38`, under the same MIT license.
+from [Reliquary v25.0.0 / HSR 4.7](https://github.com/IceDynamix/reliquary/tree/ba9319be47e406ef5bf52c6b7b04b859c65a8026),
+revision `ba9319be47e406ef5bf52c6b7b04b859c65a8026`, under the same MIT license.
 
-Continuous inventory deletion uses Reliquary HSR 4.6 revision
-[`938287c5cbba930ad68aa3f7010cf7ad953bc654`](https://github.com/IceDynamix/reliquary/tree/938287c5cbba930ad68aa3f7010cf7ad953bc654),
+Continuous inventory deletion and login identity use the same HSR 4.7 revision
+[`ba9319be47e406ef5bf52c6b7b04b859c65a8026`](https://github.com/IceDynamix/reliquary/tree/ba9319be47e406ef5bf52c6b7b04b859c65a8026),
 `src/network/command/command_id.rs` and `proto/PlayerSyncScNotify.rs`, under
 the same MIT license. The local decoder requires that reviewed dispatch revision
 and command before applying explicit relic or Light Cone instance removals.
-The newer HSR 4.7 inventory schemas have not been adopted here.
+The current token, login, Quest and inventory record layouts are reviewed together.
 
 The local adaptation preserves independent KCP conversations, removes raw
 packet/seed trace logging, bounds malformed frames, and infers the login seed
@@ -40,9 +40,12 @@ MultiplePathAvatarConfig from the same public GIlore source revision
 The substat calculation is `count * base + step * stepValue`, with ratios
 converted to percentage points like the existing HSR observation contract.
 
-The unchanged `keys/hsr.json` public interoperability dataset comes from
+The historical entries in `keys/hsr.json` come from
 [stardb-exporter](https://github.com/juliuskreutz/stardb-exporter/tree/faac466be74cf234c9855c14dd7d723e557e9971).
-SHA-256: `5f45f27da792a7058855cfbea3e2ea39eca39d5976ab37038a45b52cb29a8b7b`.
+The additional 4.7 key selector `2766937619` comes from Reliquary v25.0.0's
+`src/network/crypto.rs` at the revision above. Its 4096 decoded bytes have
+SHA-256 `4f25f94bf7e5ee986602a08cc3e06806aa933312022df415e3add67d259fd03c`.
+The freshness checker verifies both primary sources and rejects disagreements.
 It contains version-indexed dispatch keys, never account/session data.
 The prior auto-reliquary dependency has been replaced by the local audited
 transport. Achievement classification remains independent and accepts packed
@@ -51,14 +54,15 @@ Quest counters without retaining them in the completed-achievement export.
 ## Embedded normalized reference
 
 GGScannerOCR and GGScanner embed a compact normalized snapshot generated from
-the manifest-verified GIlore/GGStarRail reference boundary at GIlore commit
-`1ca018ee615011e61f90f11c3f47738e6ebac30b` and public source revision
-`8cdb905dc2f8e6fffa9be4eb07af3e34435d6091`. The source manifest SHA-256 is
-`5acf3567d23a9a13531a62c448d075d218e824996ca25e994cef1c322bb89eb1`;
+the manifest-verified HoyoData/GGStarRail reference bundle at producer commit
+`0e63fc8fce3e00d1dadef9c695e121e89644aeca` and public source revision
+`dfdfe3337bcfa14f000074d2dae7058118193ea6`. The historical GIlore provider
+namespace is retained. The source manifest SHA-256 is
+`910879a53d50bf3470f0a2427711a04d71dfca0175faf8c98c294d523ed8eb24`;
 the deterministic embedded document SHA-256 is
-`e22c53293b3c2bd3cb4f90b460b699af98ef66f7df9a9f873f7b21ee148208ec`.
+`874cfdbb9bc4e75c33f08082c0bc01ea386a110f631ce07c64e03fb55b9c427d`.
 The snapshot contains the public identifiers, names, aliases, and gameplay
-metadata needed for strict normalization, including 1,921 public achievement
+metadata needed for strict normalization, including 1,993 public achievement
 definition IDs. It contains no icon binaries, account/session/capture data,
 server item identifiers, or packet data. The source manifest remains the
 authority for upstream revision and license-status metadata.

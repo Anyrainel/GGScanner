@@ -13,15 +13,15 @@ const EMBEDDED_BYTES: &[u8] = include_bytes!("../assets/gilore_reference_v1.json
 fn embedded_reference_is_integrity_pinned_private_and_live_complete() {
     assert_eq!(
         EMBEDDED_GILORE_COMMIT,
-        "1ca018ee615011e61f90f11c3f47738e6ebac30b"
+        "0e63fc8fce3e00d1dadef9c695e121e89644aeca"
     );
     assert_eq!(
         EMBEDDED_GILORE_SOURCE_REVISION,
-        "8cdb905dc2f8e6fffa9be4eb07af3e34435d6091"
+        "dfdfe3337bcfa14f000074d2dae7058118193ea6"
     );
     assert_eq!(
         EMBEDDED_GILORE_MANIFEST_SHA256,
-        "5acf3567d23a9a13531a62c448d075d218e824996ca25e994cef1c322bb89eb1"
+        "910879a53d50bf3470f0a2427711a04d71dfca0175faf8c98c294d523ed8eb24"
     );
     assert_eq!(EMBEDDED_BYTES.len(), EMBEDDED_REFERENCE_BYTE_COUNT);
     assert_eq!(
@@ -47,4 +47,11 @@ fn embedded_reference_is_integrity_pinned_private_and_live_complete() {
         EMBEDDED_REFERENCE_ACHIEVEMENT_COUNT
     );
     assert!(cache.has_achievement(EMBEDDED_REFERENCE_SENTINEL_ACHIEVEMENT_ID));
+    assert!(cache.character(1511).is_some());
+    for id in [22009, 23065] {
+        assert!(cache.light_cone(id).is_some(), "current Light Cone {id}");
+    }
+    for id in [63295, 63305] {
+        assert!(cache.gear(id).is_some(), "current Planar Ornament {id}");
+    }
 }

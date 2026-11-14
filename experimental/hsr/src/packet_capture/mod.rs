@@ -46,7 +46,7 @@ pub mod proto;
 pub mod protocol;
 
 /// Decoder revision written into HSR exports.
-pub const HSR_CAPTURE_REVISION: &str = "reliquary-sync-4.6-v3";
+pub const HSR_CAPTURE_REVISION: &str = "reliquary-sync-4.7-v1";
 
 /// HSR's two UDP gateway ports. Kept public for build-time regression tests.
 pub const HSR_PACKET_PORTS: [u16; 2] = [23301, 23302];
@@ -1003,8 +1003,8 @@ mod tests {
     #[test]
     fn embedded_dispatch_keys_are_pinned_and_decodable() {
         let keys = load_embedded_dispatch_keys().unwrap();
-        assert_eq!(keys.len(), 31);
-        assert!(keys.contains_key(&2920436228));
+        assert_eq!(keys.len(), 32);
+        assert!(keys.contains_key(&2766937619));
         assert!(keys.values().all(|key| key.len() >= 4_096));
         assert_eq!(HSR_PACKET_PORTS, [23301, 23302]);
     }
@@ -1012,9 +1012,9 @@ mod tests {
     #[test]
     fn current_inventory_wire_tags_decode_without_using_generated_writers() {
         use protobuf::Message;
-        // HSR 4.6 wire records, independent of the generated serializers.
+        // HSR 4.7 wire records, independent of the generated serializers.
         let cone = proto::Equipment::Equipment::parse_from_bytes(&[
-            8, 80, 24, 1, 56, 6, 64, 1, 72, 0xe9, 7, 112, 5, 120, 0xa1, 0x9c, 1,
+            8, 6, 16, 0xa1, 0x9c, 1, 24, 80, 32, 5, 48, 1, 64, 1, 96, 0xe9, 7,
         ])
         .unwrap();
         assert_eq!(
@@ -1030,7 +1030,7 @@ mod tests {
         );
         assert!(cone.is_protected);
         let relic = proto::Relic::Relic::parse_from_bytes(&[
-            8, 1, 16, 0xe9, 7, 32, 15, 56, 1, 88, 0xd3, 0xdc, 3, 112, 1, 120, 6,
+            8, 1, 48, 15, 56, 0xe9, 7, 64, 1, 96, 6, 104, 0xd3, 0xdc, 3, 120, 1,
         ])
         .unwrap();
         assert_eq!(

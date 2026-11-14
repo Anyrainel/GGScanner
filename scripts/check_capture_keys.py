@@ -1,4 +1,4 @@
-"""Read-only check of bundled keys against one immutable StarDB revision."""
+"""Read-only check of bundled keys against immutable StarDB and Reliquary revisions."""
 
 import argparse
 import base64
@@ -13,6 +13,8 @@ import urllib.request
 
 
 SOURCE_REPOSITORY = "juliuskreutz/stardb-exporter"
+RELIQUARY_REPOSITORY = "IceDynamix/reliquary"
+RELIQUARY_KEY_FILE = "src/network/crypto.rs"
 GAME_FILES = {
     "gi": ("genshin/keys/gi.json", 0xFFFF),
     "hsr": ("experimental/hsr/keys/hsr.json", 0xFFFFFFFF),
@@ -58,6 +60,65 @@ def parse_keys(data, max_identifier):
     return decoded
 
 
+def parse_reliquary_keys(data: bytes) -> dict[str, bytes]:
+    source = data.decode("utf-8")
+    header = r"\blet\s+b64\s*=\s*match\s+version\s*\{"
+    if len(re.findall(header, source)) != 1:
+        raise ValueError("Reliquary must contain exactly one dispatch-key match table")
+    table = re.search(
+        header + r"(?P<arms>.*?)\s*_\s*=>\s*\{\s*"
+        r'(?:println!\(\s*"[^"\\]*"\s*\);\s*)?'
+        r"return\s+None\s*;?\s*\}\s*,?\s*\};",
+        source, re.DOTALL,
+    )
+    if table is None:
+        raise ValueError("Reliquary dispatch-key table has an unsupported fallback")
+
+    # Accept only the reviewed base64 string/concat! arms. Unrecognized Rust
+    # expressions must block verification, never silently hide a new key.
+    literal = r'"[A-Za-z0-9+/=\s]+"'
+    concatenated = r"concat\s*!\s*\(\s*" + literal + r"(?:\s*,\s*" + literal + r")*\s*,?\s*\)"
+    arm = re.compile(
+        r"\s*(?P<id>0|[1-9][0-9]*)\s*=>\s*(?P<value>"
+        + literal + "|" + concatenated + r")\s*,",
+    )
+    arms = table.group("arms")
+    encoded = {}
+    position = 0
+    while arms[position:].strip():
+        match = arm.match(arms, position)
+        if match is None:
+            raise ValueError("Reliquary contains an unsupported dispatch-key arm")
+        identifier = match.group("id")
+        if identifier in encoded:
+            raise ValueError(f"Reliquary contains duplicate dispatch key {identifier}")
+        pieces = re.findall(r'"([^"]*)"', match.group("value"))
+        encoded[identifier] = re.sub(r"\s+", "", "".join(pieces))
+        position = match.end()
+    return parse_keys(json.dumps(encoded).encode(), 0xFFFFFFFF)
+
+
+def merge_keys(first: dict[str, bytes], second: dict[str, bytes]) -> dict[str, bytes]:
+    conflicting = sorted(
+        (identifier for identifier in first.keys() & second.keys()
+         if first[identifier] != second[identifier]), key=int,
+    )
+    if conflicting:
+        raise ValueError(f"StarDB and Reliquary disagree on HSR key IDs={conflicting}")
+    return first | second
+
+
+def resolve_revision(repository: str, branch: str) -> str:
+    metadata = json.loads(download(
+        f"https://api.github.com/repos/{repository}/commits/{branch}"))
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{repository} commit metadata must be an object")
+    revision = metadata.get("sha")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError(f"{repository} did not return a valid commit identifier")
+    return revision
+
+
 def compare_keys(local, upstream):
     # Keep historical local keys even if upstream stops distributing them.
     missing = sorted(upstream.keys() - local.keys(), key=int)
@@ -79,20 +140,20 @@ def read_local(root, path, revision):
 
 
 def check(root, revisions):
-    metadata = json.loads(download(
-        f"https://api.github.com/repos/{SOURCE_REPOSITORY}/commits/master"))
-    if not isinstance(metadata, dict):
-        raise ValueError("upstream commit metadata must be an object")
-    source_revision = metadata.get("sha")
-    if not isinstance(source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", source_revision):
-        raise ValueError("upstream did not return a valid commit identifier")
+    source_revision = resolve_revision(SOURCE_REPOSITORY, "master")
     upstream = {
         game: parse_keys(download(
             f"https://raw.githubusercontent.com/{SOURCE_REPOSITORY}/{source_revision}/keys/{game}.json"
         ), max_identifier)
         for game, (_, max_identifier) in GAME_FILES.items()
     }
-    print(f"Checking capture keys against {SOURCE_REPOSITORY}@{source_revision[:12]}")
+    reliquary_revision = resolve_revision(RELIQUARY_REPOSITORY, "main")
+    reliquary = parse_reliquary_keys(download(
+        f"https://raw.githubusercontent.com/{RELIQUARY_REPOSITORY}/{reliquary_revision}/{RELIQUARY_KEY_FILE}"
+    ))
+    upstream["hsr"] = merge_keys(upstream["hsr"], reliquary)
+    print(f"Checking capture keys against {SOURCE_REPOSITORY}@{source_revision}")
+    print(f"HSR also checks {RELIQUARY_REPOSITORY}@{reliquary_revision}/{RELIQUARY_KEY_FILE}")
     outdated = False
     for revision in dict.fromkeys(revisions or [None]):
         label = revision or "working tree"

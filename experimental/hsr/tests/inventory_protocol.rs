@@ -293,18 +293,18 @@ fn achievements_are_optional_but_cannot_complete_inventory_capture_alone() {
         .map(|id| {
             let mut bytes = Vec::new();
             let mut out = CodedOutputStream::vec(&mut bytes);
-            out.write_uint32(12, id).unwrap();
-            out.write_uint32(1, 3).unwrap();
-            out.write_uint32(3, 1_700_000_000).unwrap();
+            out.write_uint32(11, id).unwrap();
+            out.write_uint32(3, 3).unwrap();
+            out.write_uint32(10, 1_700_000_000).unwrap();
             // Current Quest records may have additional packed counters.
-            out.write_bytes(10, &[1, 2, 3]).unwrap();
+            out.write_bytes(7, &[1, 2, 3]).unwrap();
             out.flush().unwrap();
             drop(out);
             bytes
         })
         .collect::<Vec<_>>();
     decoder
-        .receive_command(&group(67, &[group(10, &records)]))
+        .receive_command(&group(67, &[group(9, &records)]))
         .unwrap();
     let mut only = HsrPacketDecoder::new(
         refs.clone(),
@@ -316,7 +316,7 @@ fn achievements_are_optional_but_cannot_complete_inventory_capture_alone() {
         },
     )
     .unwrap();
-    only.receive_command(&group(67, &[group(10, &records)]))
+    only.receive_command(&group(67, &[group(9, &records)]))
         .unwrap();
     assert!(only.state().complete);
     let inventory = only.state().inventory.clone().unwrap();

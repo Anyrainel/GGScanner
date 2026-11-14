@@ -141,8 +141,8 @@ retains the unfiltered decrypted messages in the diagnostic directory. Separate
 output directories keep the original capture session intact. This diagnostic
 material must remain local and must not be committed as a test fixture.
 
-The inner inventory schemas are the reviewed HSR 4.6 protobuf types from
-Reliquary revision `0b8c1d4f8eb5ae9722b5c3273e36a464b7188a38`. Command
+The inner inventory schemas are the reviewed HSR 4.7 protobuf types from
+Reliquary revision `ba9319be47e406ef5bf52c6b7b04b859c65a8026`. Command
 and outer-field rotation are handled, but arbitrary inner-field or encryption
 changes can still require an update. Scalar fields with identical shapes
 cannot always be inferred unambiguously from values alone.
@@ -168,17 +168,21 @@ made from those fixtures.
 
 ## Captured account identity
 
-The reviewed HSR 4.6 incoming login layout exposes UID in
-`PlayerGetTokenScRsp` (command 16, field 15), and nickname in
-`PlayerLoginScRsp` (command 25, field 4 `PlayerBasicInfo`, then field 1).
-The decoder pins identity parsing to dispatch-key identifier `2920436228` and
-the schemas in Reliquary commit `938287c5cbba930ad68aa3f7010cf7ad953bc654`:
-[token](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerGetTokenScRsp.rs),
-[login](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerLoginScRsp.rs), and
-[basic info](https://github.com/IceDynamix/reliquary/blob/938287c5cbba930ad68aa3f7010cf7ad953bc654/src/network/command/proto/PlayerBasicInfo.rs).
+The reviewed HSR 4.7 incoming login layout exposes UID in
+`PlayerGetTokenScRsp` (command 71, field 10), alongside seed field 9 and success
+return code 11. Nickname comes from `PlayerLoginScRsp` (command 19, field 10
+`PlayerBasicInfo`, then field 1; success return code 4).
+The decoder pins identity parsing to dispatch-key identifier `2766937619` and
+the schemas in Reliquary v25.0.0 commit `ba9319be47e406ef5bf52c6b7b04b859c65a8026`:
+[token](https://github.com/IceDynamix/reliquary/blob/ba9319be47e406ef5bf52c6b7b04b859c65a8026/src/network/command/proto/PlayerGetTokenScRsp.rs),
+[login](https://github.com/IceDynamix/reliquary/blob/ba9319be47e406ef5bf52c6b7b04b859c65a8026/src/network/command/proto/PlayerLoginScRsp.rs), and
+[basic info](https://github.com/IceDynamix/reliquary/blob/ba9319be47e406ef5bf52c6b7b04b859c65a8026/src/network/command/proto/PlayerBasicInfo.rs).
 Unknown revisions, failed responses, outgoing requests and arbitrary matching
-integers/strings never establish identity. Existing local raw login frames
-confirmed populated fields in this layout; private frames are not test fixtures.
+integers/strings never establish identity. The public 4.7 dispatch key is taken
+from the same revision's `src/network/crypto.rs`; historical bundled keys do not
+authorize this schema. Existing JSON exports remain importable. Current 4.7
+verification uses explicit primary wire tags and synthetic encrypted packets,
+including the actual bundled dispatch key; no fresh live-game login is claimed.
 
 Identity is retained per KCP conversation. A verified new login clears the
 previous inventory and identity before selecting that conversation; delayed
@@ -201,3 +205,15 @@ The UID is an account-routing key and the nickname is display text, not proof of
 account ownership. Supporting a new inner login schema requires explicit review.
 Automatic website sync routes UID-bearing data to the matching account and data
 without a UID to Default, independent of the currently viewed profile.
+
+## Reference and release ordering
+
+The embedded fallback is regenerated from HoyoData's verified 4.7 bundle at
+public source revision `dfdfe3337bcfa14f000074d2dae7058118193ea6`, including
+the current character, Light Cone and Relic definitions. Raw packet regressions
+include character 1511, Light Cone 23065 and Planar Ornament 63295.
+
+Publish the updated Star Rail website shared reference before releasing the
+updated scanner. Online clients retain the existing two-hour cache/refresh
+policy and use that hosted data; the refreshed embedded snapshot covers cold
+offline startup. It does not bypass or conceal an older hosted/cached reference.

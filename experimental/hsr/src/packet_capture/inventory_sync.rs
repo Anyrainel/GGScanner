@@ -1,6 +1,6 @@
 //! Destructive deltas require the reviewed command and dispatch revision.
-//! Reliquary 938287c5 (4.6), command_id.rs / PlayerSyncScNotify.rs:
-//! command 634, del_equipment_list=4, del_relic_list=15. Outer inventory
+//! Reliquary ba9319be (4.7), command_id.rs / PlayerSyncScNotify.rs:
+//! command 674, del_equipment_list=11, del_relic_list=10. Outer inventory
 //! discovery remains heuristic; arbitrary integer lists never delete items.
 use super::protocol::{parse_message, WireValue};
 use crate::{scanner_export::CaptureInstanceIds, HsrError, HsrResult, LocalizedText};
@@ -10,15 +10,15 @@ pub(super) fn deletions(
     command: u16,
     bytes: &[u8],
 ) -> HsrResult<Option<CaptureInstanceIds>> {
-    if dispatch_key != Some(2_920_436_228) || command != 634 {
+    if dispatch_key != Some(2_766_937_619) || command != 674 {
         return Ok(None);
     }
     let fields = parse_message(bytes).ok_or_else(invalid)?;
     let mut deleted = CaptureInstanceIds::default();
     for field in fields {
         match (field.number, field.value) {
-            (tag @ (4 | 15), value) => {
-                let ids = if tag == 4 {
+            (tag @ (10 | 11), value) => {
+                let ids = if tag == 11 {
                     &mut deleted.light_cones
                 } else {
                     &mut deleted.relics
@@ -36,7 +36,21 @@ pub(super) fn deletions(
             },
             // All other fields in this reviewed notification are messages.
             (
-                1 | 2 | 5..=12 | 242 | 267 | 287 | 492 | 620 | 781 | 789 | 1747 | 1757,
+                2
+                | 3
+                | 4
+                | 6..=9
+                | 12
+                | 14
+                | 220
+                | 305
+                | 425
+                | 542
+                | 1084
+                | 1533
+                | 1606
+                | 2020
+                | 2039,
                 WireValue::Bytes(_),
             ) => {},
             _ => return Err(invalid()),

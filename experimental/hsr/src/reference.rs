@@ -634,7 +634,10 @@ fn read_file(path: &Path, label: &str) -> HsrResult<Vec<u8>> {
 
 fn validate_gilore_header(bundle: &str, game: &str, schema: &str) -> HsrResult<()> {
     let (major, _, _) = parse_gilore_schema_version(schema)?;
-    if bundle != "ggstarrail-reference" || game != "honkai_star_rail" || major != 1 {
+    if bundle != "ggstarrail-reference"
+        || game != "honkai_star_rail"
+        || (major != 1 && schema != "2.1.0")
+    {
         return reference_error(format!(
             "unsupported GIlore envelope bundle={bundle}, game={game}, schema={schema}"
         ));
@@ -644,7 +647,7 @@ fn validate_gilore_header(bundle: &str, game: &str, schema: &str) -> HsrResult<(
 
 fn gilore_schema_includes_achievements(schema: &str) -> HsrResult<bool> {
     let (major, minor, _) = parse_gilore_schema_version(schema)?;
-    Ok(major == 1 && minor >= 2)
+    Ok((major == 1 && minor >= 2) || major == 2)
 }
 
 fn parse_gilore_schema_version(schema: &str) -> HsrResult<(u32, u32, u32)> {

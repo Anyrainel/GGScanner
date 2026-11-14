@@ -80,7 +80,7 @@ leaves existing progress untouched. Legacy `achievements` exports remain importa
   "generator": {
     "name": "GOODScanner",
     "version": "0.0.0",
-    "captureRevision": "reliquary-quest-4.6-v2",
+    "captureRevision": "reliquary-sync-4.7-v1",
     "compatibility": "HSR-Scanner v1.2.0 / format v4"
   },
   "metadata": {

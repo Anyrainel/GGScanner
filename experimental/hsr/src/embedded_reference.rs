@@ -13,14 +13,15 @@ use crate::{
 
 pub const EMBEDDED_REFERENCE_FORMAT_VERSION: u32 = 1;
 pub const EMBEDDED_REFERENCE_PROVIDER: &str = "gilore.ggstarrail-reference";
-pub const EMBEDDED_GILORE_COMMIT: &str = "1ca018ee615011e61f90f11c3f47738e6ebac30b";
-pub const EMBEDDED_GILORE_SOURCE_REVISION: &str = "8cdb905dc2f8e6fffa9be4eb07af3e34435d6091";
+// The stable historical GIlore namespace is now produced by HoyoData.
+pub const EMBEDDED_GILORE_COMMIT: &str = "0e63fc8fce3e00d1dadef9c695e121e89644aeca";
+pub const EMBEDDED_GILORE_SOURCE_REVISION: &str = "dfdfe3337bcfa14f000074d2dae7058118193ea6";
 pub const EMBEDDED_GILORE_MANIFEST_SHA256: &str =
-    "5acf3567d23a9a13531a62c448d075d218e824996ca25e994cef1c322bb89eb1";
+    "910879a53d50bf3470f0a2427711a04d71dfca0175faf8c98c294d523ed8eb24";
 pub const EMBEDDED_REFERENCE_SHA256: &str =
-    "e22c53293b3c2bd3cb4f90b460b699af98ef66f7df9a9f873f7b21ee148208ec";
-pub const EMBEDDED_REFERENCE_BYTE_COUNT: usize = 331_788;
-pub const EMBEDDED_REFERENCE_ACHIEVEMENT_COUNT: usize = 1_921;
+    "874cfdbb9bc4e75c33f08082c0bc01ea386a110f631ce07c64e03fb55b9c427d";
+pub const EMBEDDED_REFERENCE_BYTE_COUNT: usize = 349_106;
+pub const EMBEDDED_REFERENCE_ACHIEVEMENT_COUNT: usize = 1_993;
 pub const EMBEDDED_REFERENCE_SENTINEL_ACHIEVEMENT_ID: u32 = 4_010_101;
 
 const EMBEDDED_REFERENCE_BYTES: &[u8] = include_bytes!("../assets/gilore_reference_v1.json");
