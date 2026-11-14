@@ -267,6 +267,10 @@ impl StarRailCaptureState {
             capturing: false,
             complete: true,
             has_key_exchange: true,
+            export_details: hsr_scanner::scanner_export::CaptureExportDetails {
+                uid: Some(600_000_001),
+                ..Default::default()
+            },
             achievement_count,
             quests: completed_ids
                 .into_iter()

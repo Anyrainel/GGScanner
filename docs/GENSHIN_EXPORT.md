@@ -1,8 +1,8 @@
 # Genshin export identity
 
-Genshin OCR and packet capture export GOOD v3. Existing exports retain their
-current shape: the scanner does not add identity metadata when identity is
-unavailable.
+Genshin OCR and packet capture export GOOD v3. Packet captures, both one-time
+and continuous, require a verified login UID and include `metadata.uid` in every
+successful export. OCR and previously saved exports may omit identity metadata.
 
 The optional GGScanner extension is:
 
@@ -19,8 +19,8 @@ strings. `uid` means the in-game account UID, not a HoYoverse login identifier,
 an equipment GUID, or a generated scanner/session ID. `nickname` is the mutable
 in-game display name and must not be used as an account identifier. A producer
 must populate identity only from a validated source for the same account and
-login as the inventory. Ordinary exports and the `data` object of continuous
-responses carry the same optional metadata.
+login as the inventory. One-time packet exports and the `data` object of
+continuous responses carry the same verified UID metadata.
 
 Genshin packet capture reads the public game UID from a successful incoming
 login response and exports it as `metadata.uid`. The reviewed 7.2 layout uses
@@ -44,11 +44,14 @@ Traffic from retired conversations cannot repopulate the current account.
 If the server reuses a retired conversation ID within one running listener,
 restart that listener; a reused-ID acknowledgment cannot currently be
 distinguished from delayed old traffic.
-Continuous capture waits for a verified UID and the initial inventory before
-publishing. An unsupported token identity layout reports a capture error instead
-of publishing unidentified inventory into another account's fallback profile.
+Both one-time and continuous capture wait for a verified UID and the selected
+initial data before completing. An unsupported token identity layout reports a
+capture error with instructions to update GGScanner and log in again. Inventory
+alone cannot complete capture or produce an anonymous public packet export.
 
-Consumers must continue to accept old GOOD exports with no metadata. For
-legacy continuous snapshots without a validated UID, the website can use the
-single profile explicitly selected in its profile-level sync setting. Identified
-captures route automatically by UID regardless of the currently viewed profile.
+Consumers continue to accept existing GOOD and OCR exports with no metadata.
+Automatic website sync routes UID-bearing data to the matching account,
+creating one when necessary; data without a UID routes to Default. The currently
+viewed profile does not select the destination. Manual imports can offer an
+explicit account-binding review. This fallback is an import rule, not permission
+for GGScanner packet capture to omit its UID.

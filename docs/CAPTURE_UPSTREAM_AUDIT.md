@@ -194,3 +194,35 @@ Validation passed 340 Genshin tests (4 ignored), 214 Star Rail tests, 21 Genshin
 website continuous-import tests, the full GGStarRail check (1,263 app tests and
 45 Worker tests), 11 capture-checker tests, Rust formatting and the Windows
 GGScanner release build. All 35 reviewed local source fingerprints match.
+
+## Required packet-capture identity — 2026-11-13
+
+Both one-time and continuous packet capture now require a verified login UID
+before reporting successful completion or writing a public export. Genshin's
+one-time monitor uses the same UID gate as continuous capture; an unsupported
+token layout reports an actionable error in either mode. Star Rail rejects
+otherwise complete packets without verified identity, and its public export
+builder independently rejects missing UID. Command-only diagnostic replays can
+still inspect anonymous semantic data, but cannot write successful public
+packet-capture exports. Existing OCR/export import compatibility is unchanged.
+
+This tightens the November 8 anonymous-capture behavior; no continuous-capture
+API has been publicly released that requires an anonymous legacy path. Automatic
+website sync routes by UID to its matching account and routes UID-absent input
+to Default. It never guesses identity from the currently selected profile.
+
+The accepted UID protocols remain the reviewed Genshin 7.2 RSA-verified token
+layout and HSR 4.6 dispatch revision `2920436228` documented above. No guessed
+integer fields, new protocol layouts or additional live-game compatibility are
+claimed. Synthetic full-packet tests cover both capture modes, UID-bearing
+exports, account switches, stale identity clearing and missing-identity errors.
+A fresh login with the rebuilt application remains the external live-game check.
+Star Rail also surfaces the transport's incoming session-seed transition as a
+login boundary when the UID layout is unsupported. This clears the previous
+account even if the establishment frame was missed; retired traffic cannot
+restore its identity. No UID is inferred from that seed transition.
+
+Validation passed 343 Genshin tests (4 ignored), 218 Star Rail tests, 21 app
+shared-game integration tests, 18 GUI feedback tests and 11 capture-checker
+tests. The production-feature Windows scanner binaries pass `cargo check`;
+changed Rust files pass formatting and all 35 reviewed local fingerprints match.

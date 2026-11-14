@@ -401,6 +401,8 @@ fn new_account_retires_old_conversation_and_requires_fresh_baseline() {
     let mut second = frames(22, 600_000_002, SEED_B, "Second").into_iter();
     decoder.receive_packet(second.next().unwrap()).unwrap();
     assert!(!decoder.state().complete);
+    assert_eq!(decoder.state().export_details.uid, Some(600_000_002));
+    assert!(decoder.state().inventory.is_none());
     assert!(decoder.state().session_generation > generation);
     assert!(decoder.state().build_scanner_export(&refs).is_err());
     decoder
@@ -473,10 +475,25 @@ fn outgoing_or_unreviewed_identity_is_never_attached_to_an_inventory() {
         ))
         .unwrap();
     assert!(decoder.account.is_none());
-    // Anonymous body replay remains usable, without a stable-ID claim.
+    // Decrypted body replay remains diagnostic data; it cannot prove identity
+    // or produce a successful public capture export.
     decoder.receive_command(&roster()).unwrap();
     decoder.receive_command(&bag(77, 80)).unwrap();
-    let anonymous = decoder.state().build_scanner_export(&refs).unwrap();
+    assert_eq!(
+        decoder
+            .state()
+            .build_scanner_export(&refs)
+            .unwrap_err()
+            .code(),
+        "HSR-CAPTURE-UID"
+    );
+    let anonymous = crate::scanner_export::build_scanner_export(
+        decoder.state().inventory.as_ref().unwrap(),
+        &refs,
+        &decoder.state().export_details,
+        None,
+    )
+    .unwrap();
     assert!(anonymous["metadata"]["uid"].is_null());
     assert!(anonymous["metadata"].get("nickname").is_none());
     assert!(anonymous["generator"].get("itemIdentity").is_none());
@@ -504,7 +521,7 @@ fn outgoing_or_unreviewed_identity_is_never_attached_to_an_inventory() {
 }
 
 #[test]
-fn identified_disconnect_then_unreviewed_login_produces_anonymous_fresh_inventory() {
+fn identified_disconnect_then_unreviewed_login_cannot_export_or_reuse_old_uid() {
     let refs = crate::load_embedded_gilore_reference().unwrap();
     let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
     decoder.enable_continuous();
@@ -516,6 +533,7 @@ fn identified_disconnect_then_unreviewed_login_produces_anonymous_fresh_inventor
     }
     decoder.receive_packet(connection_frame(404, 11)).unwrap();
     assert!(!decoder.state().complete);
+    assert_eq!(decoder.state().export_details.uid, None);
     decoder.receive_packet(connection_frame(325, 22)).unwrap();
     decoder
         .receive_packet(incoming(22, 0, 16, &token(600_000_002, SEED_B), &[0; 4096]))
@@ -527,16 +545,150 @@ fn identified_disconnect_then_unreviewed_login_produces_anonymous_fresh_inventor
     decoder
         .receive_packet(incoming(22, 2, 65500, &roster(), &key))
         .unwrap();
-    decoder
+    let error = decoder
         .receive_packet(incoming(22, 3, 65500, &bag(77, 70), &key))
-        .unwrap();
-    let export = decoder.state().build_scanner_export(&refs).unwrap();
-    assert!(export["metadata"]["uid"].is_null());
-    assert!(export["metadata"].get("nickname").is_none());
-    assert!(export["generator"].get("itemIdentity").is_none());
-    assert_eq!(export["light_cones"][0]["level"], 70);
+        .unwrap_err();
+    assert_eq!(error.code(), "HSR-CAPTURE-UID");
+    assert!(!decoder.state().complete);
+    assert_eq!(decoder.state().export_details.uid, None);
+    assert_eq!(decoder.state().export_details.nickname, None);
+    assert!(decoder.state().build_scanner_export(&refs).is_err());
     decoder
         .receive_packet(incoming(11, 4, 65500, &bag(99, 80), &session_key(SEED_A)))
         .unwrap();
-    assert_eq!(decoder.state().build_scanner_export(&refs).unwrap(), export);
+    assert_eq!(decoder.state().export_details.uid, None);
+    assert!(!decoder.state().complete);
+}
+
+#[test]
+fn unreviewed_login_without_a_handshake_invalidates_the_previous_account() {
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let mut decoder = HsrPacketDecoder::new(refs.clone(), targets()).unwrap();
+    decoder.enable_continuous();
+    configure(&mut decoder);
+    decoder.dispatch_keys.insert(0, vec![0; 4096]);
+    decoder.sniffer = GameSniffer::new().set_initial_keys(decoder.dispatch_keys.clone());
+    for frame in frames(11, 600_000_001, SEED_A, "First") {
+        decoder.receive_packet(frame).unwrap();
+    }
+    assert!(decoder.state().complete);
+    let generation = decoder.state().session_generation;
+    // pktmon can miss establishment; a decoded new seed still proves that the
+    // previous inventory no longer belongs to the active login.
+    decoder
+        .receive_packet(incoming(22, 0, 16, &token(600_000_002, SEED_B), &[0; 4096]))
+        .unwrap();
+    assert!(decoder.state().session_generation > generation);
+    assert_eq!(decoder.state().export_details.uid, None);
+    assert!(decoder.state().inventory.is_none());
+    assert!(!decoder.state().complete);
+    assert!(decoder.state().build_scanner_export(&refs).is_err());
+    decoder
+        .receive_packet(incoming(11, 4, 65500, &bag(99, 80), &session_key(SEED_A)))
+        .unwrap();
+    assert!(!decoder.state().has_items);
+    let key = session_key(SEED_B);
+    decoder
+        .receive_packet(incoming(22, 1, 65500, &roster(), &key))
+        .unwrap();
+    let error = decoder
+        .receive_packet(incoming(22, 2, 65500, &bag(77, 70), &key))
+        .unwrap_err();
+    assert_eq!(error.code(), "HSR-CAPTURE-UID");
+    assert_eq!(decoder.state().export_details.uid, None);
+    assert!(!decoder.state().complete);
+}
+
+#[test]
+fn normal_and_continuous_monitors_report_unverified_identity_instead_of_success() {
+    for continuous in [false, true] {
+        for reviewed_revision in [false, true] {
+            let refs = crate::load_embedded_gilore_reference().unwrap();
+            let shared = Arc::new(Mutex::new(HsrCaptureState::default()));
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let store = observed.clone();
+            let mut monitor =
+                HsrCaptureMonitor::new(shared.clone(), refs.clone(), targets()).unwrap();
+            if continuous {
+                monitor =
+                    monitor.with_continuous(move |state| store.lock().unwrap().push(state.clone()));
+            }
+            configure(&mut monitor.decoder);
+            let dispatch = if reviewed_revision {
+                dispatch_key()
+            } else {
+                vec![0; 4096]
+            };
+            let version = if reviewed_revision { VERSION } else { 0 };
+            monitor.decoder.dispatch_keys = HashMap::from([(version, dispatch.clone())]);
+            monitor.decoder.sniffer =
+                GameSniffer::new().set_initial_keys(monitor.decoder.dispatch_keys.clone());
+            monitor.started = Some(tokio::time::Instant::now());
+            let uid = if reviewed_revision { 0 } else { 600_000_001 };
+            monitor.handle_packet(incoming(11, 0, 16, &token(uid, SEED_A), &dispatch));
+            let key = session_key(SEED_A);
+            monitor.handle_packet(incoming(11, 1, 65500, &roster(), &key));
+            monitor.handle_packet(incoming(11, 2, 65500, &bag(77, 80), &key));
+            let state = shared.lock().unwrap();
+            assert!(!state.complete);
+            assert!(!state.capturing);
+            let error = state
+                .error
+                .as_ref()
+                .expect("missing UID must be actionable");
+            assert_eq!(error.code(), "HSR-CAPTURE-UID");
+            assert!(error
+                .hint()
+                .select(crate::Language::En)
+                .contains("log in after starting capture"));
+            assert!(state.build_scanner_export(&refs).is_err());
+            if continuous {
+                let observed = observed.lock().unwrap();
+                assert!(observed.iter().all(|snapshot| !snapshot.complete));
+                assert!(observed.last().unwrap().error.is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_batched_unverified_login_and_inventory_clears_shared_identity_before_error() {
+    let refs = crate::load_embedded_gilore_reference().unwrap();
+    let shared = Arc::new(Mutex::new(HsrCaptureState::default()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let store = observed.clone();
+    let mut monitor = HsrCaptureMonitor::new(shared.clone(), refs.clone(), targets())
+        .unwrap()
+        .with_continuous(move |state| store.lock().unwrap().push(state.clone()));
+    configure(&mut monitor.decoder);
+    monitor.started = Some(tokio::time::Instant::now());
+    for frame in frames(11, 600_000_001, SEED_A, "First") {
+        monitor.handle_packet(frame);
+    }
+    let generation = shared.lock().unwrap().session_generation;
+    assert_eq!(shared.lock().unwrap().export_details.uid, Some(600_000_001));
+    let key = session_key(SEED_B);
+    let frames = [
+        incoming(22, 0, 16, &token(0, SEED_B), &dispatch_key()),
+        incoming(22, 1, 65500, &roster(), &key),
+        incoming(22, 2, 65500, &bag(77, 70), &key),
+    ];
+    let mut packet = frames[0][..42].to_vec();
+    for frame in frames {
+        packet.extend_from_slice(&frame[42..]);
+    }
+    let payload_len = packet.len() - 42;
+    packet[16..18].copy_from_slice(&((20 + 8 + payload_len) as u16).to_be_bytes());
+    packet[38..40].copy_from_slice(&((8 + payload_len) as u16).to_be_bytes());
+    monitor.handle_packet(packet);
+    let state = shared.lock().unwrap();
+    assert!(state.session_generation > generation);
+    assert_eq!(state.export_details.uid, None);
+    assert_eq!(state.export_details.nickname, None);
+    assert!(!state.complete);
+    assert_eq!(state.error.as_ref().unwrap().code(), "HSR-CAPTURE-UID");
+    assert!(state.build_scanner_export(&refs).is_err());
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.last().unwrap().export_details.uid, None);
+    assert!(observed.last().unwrap().error.is_some());
 }

@@ -5,7 +5,9 @@ from the game's title screen. Characters, Light Cones, and Relics (including
 Planar Ornaments), and Achievements & objectives each have a checkbox, matching the Genshin
 export settings. All four default to selected; selections persist independently
 of OCR settings. Unchecked categories are excluded from the export and completion
-requirements. Capture stops and saves one export file after the requested data arrives. The default destination is beside the
+requirements. A verified login UID is required for every packet capture, including
+one-time and continuous capture. Capture stops and saves one export file after
+the identity and requested data arrive. The default destination is beside the
 executable; existing saved output destinations are retained. The result shows
 the actual file path.
 
@@ -67,7 +69,7 @@ file uses that required v4 compatibility discriminator and its compatible
 build identifier; a separate `generator` object keeps the historical GOODScanner name and
 its capture revision. It does not claim to have been captured by Kel-Z's tool.
 Native server item IDs are never exported. Verified capture accounts receive
-stable opaque item IDs; anonymous/OCR exports retain scan-order IDs. UID and
+stable opaque item IDs; OCR exports retain scan-order IDs. UID and
 optional nickname come from the reviewed incoming login; see the identity
 section below. The primary format references are
 [Fribbels' parser](https://github.com/fribbels/hsr-optimizer/blob/main/src/lib/importer/kelzFormatParser.tsx)
@@ -183,9 +185,19 @@ previous inventory and identity before selecting that conversation; delayed
 commands and disconnects from a retired conversation cannot update or invalidate
 the new account. A fresh established conversation, verified token, or selected
 conversation disconnect invalidates the baseline and advances its generation.
-An unknown identity schema can still publish an anonymous baseline after a fresh
-transport establishment; it cannot inherit the previous account’s identity. Both normal capture and continuous sync use the same public v4
-export builder. A fresh baseline is required before publishing its UID, optional
+An incoming session-seed transition also invalidates the previous account when
+its identity schema is unsupported and the transport handshake was missed.
+An unknown identity schema cannot complete either one-time or continuous
+capture. Once the requested data arrives without verified identity, capture
+reports `HSR-CAPTURE-UID` with an update/re-login instruction; it never silently
+exports anonymous data or inherits the previous account's UID. Incomplete
+sessions continue waiting, with UID-specific timeout diagnostics when needed.
+Both capture modes use the same public v4 export builder, which independently
+requires the verified UID. Decrypted-command replay can inspect decoded data,
+but cannot establish identity or write a public capture export without the raw
+login frames. A fresh baseline is required before publishing its UID, optional
 nickname and account-scoped opaque item IDs; see `HSR_EXPORT.md`.
 The UID is an account-routing key and the nickname is display text, not proof of
 account ownership. Supporting a new inner login schema requires explicit review.
+Automatic website sync routes UID-bearing data to the matching account and data
+without a UID to Default, independent of the currently viewed profile.

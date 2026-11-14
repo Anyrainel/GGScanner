@@ -479,6 +479,7 @@ fn obsolete_archive_import_path_is_removed_without_changing_saved_preferences() 
             saved["starRail"]["verbose"] = false.into();
             saved["starRail"]["stopOnFailure"] = false.into();
             saved["starRail"]["dumpJobData"] = false.into();
+            saved["starRail"]["continuousCapture"] = false.into();
             saved["appearance"] = "system".into();
             saved["navigation"] = serde_json::json!({
                 "activeGame": "starRail", "selectedTab": "scanner"
@@ -957,7 +958,7 @@ fn completed_capture_advances_and_exports_while_its_tab_is_inactive() {
     assert_eq!(common["source"], "HSR-Scanner");
     assert_eq!(common["version"], 4);
     assert_eq!(common["generator"]["name"], "GOODScanner");
-    assert!(common["metadata"]["uid"].is_null());
+    assert_eq!(common["metadata"]["uid"], 600_000_001);
     assert!(!common["characters"].as_array().unwrap().is_empty());
     assert!(!common["light_cones"].as_array().unwrap().is_empty());
     assert!(!common["relics"].as_array().unwrap().is_empty());

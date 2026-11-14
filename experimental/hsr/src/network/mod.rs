@@ -50,6 +50,8 @@ pub enum GamePacket {
 pub(crate) struct DecodedCommand {
     pub command: GameCommand,
     pub identity_update: Option<IdentityUpdate>,
+    /// Incoming session-seed transition, even when its UID layout is unsupported.
+    pub login_started: bool,
     /// Retained dispatch revision identifies the reviewed destructive sync schema.
     pub dispatch_key_id: Option<u32>,
 }
@@ -355,12 +357,12 @@ impl ConversationSniffer {
             }
         }
 
-        if let Some(seed) = self
+        let session_seed = self
             .key
             .as_ref()
             .filter(|_| !self.session_key && matches!(direction, PacketDirection::Received))
-            .and_then(|_| crate::packet_capture::protocol::infer_session_seed(&command.proto_data))
-        {
+            .and_then(|_| crate::packet_capture::protocol::infer_session_seed(&command.proto_data));
+        if let Some(seed) = session_seed {
             self.session_key = true;
             info!("session decryption ready");
             self.key = Some(new_key_from_seed(seed));
@@ -392,6 +394,7 @@ impl ConversationSniffer {
         Ok(DecodedCommand {
             command,
             identity_update,
+            login_started: session_seed.is_some(),
             dispatch_key_id: self.dispatch_key_id,
         })
     }

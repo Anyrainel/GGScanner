@@ -64,6 +64,10 @@ const WORKER_HINT: LocalizedText = LocalizedText::new(
     "HSR 抓包任务意外停止。请重新抓包；若问题再次出现，请复制完整错误。",
     "The HSR capture task stopped unexpectedly. Capture again; if it recurs, copy the full error.",
 );
+const UID_HINT: LocalizedText = LocalizedText::new(
+    "无法验证星铁账号 UID。请更新 GGScanner，并在开始抓包后重新登录；若仍失败，请复制完整错误。",
+    "The Star Rail account UID could not be verified. Update GGScanner and log in after starting capture; if this persists, copy the full error.",
+);
 #[cfg(not(target_os = "windows"))]
 const PLATFORM_HINT: LocalizedText = LocalizedText::new(
     "抓包功能目前仅支持 Windows（pktmon）。Linux 后端尚未实现。",
@@ -107,7 +111,6 @@ pub struct HsrPacketDecoder {
     state: HsrCaptureState,
     conversation: Option<u32>,
     account: Option<AccountIdentity>,
-    identity_required: bool,
     retired_conversations: HashSet<u32>,
 }
 
@@ -134,7 +137,6 @@ impl HsrPacketDecoder {
             state: HsrCaptureState::default(),
             conversation: None,
             account: None,
-            identity_required: false,
             retired_conversations: HashSet::new(),
         })
     }
@@ -184,9 +186,11 @@ impl HsrPacketDecoder {
                     }
                     if let Some(update) = decoded.identity_update {
                         self.receive_identity(conv_id, update);
-                    }
-                    if self.identity_required && self.conversation.is_none() {
-                        continue;
+                    } else if decoded.login_started {
+                        // The transport recognized a new login even if the UID
+                        // layout is unsupported or its handshake was missed.
+                        // Never leave the previous account's snapshot live.
+                        self.begin_login_session(conv_id);
                     }
                     if self
                         .conversation
@@ -201,6 +205,17 @@ impl HsrPacketDecoder {
                         &decoded.command.proto_data,
                     )?;
                     self.receive_inventory_command(&decoded.command.proto_data, deleted)?;
+                    if self.state.complete && self.account.is_none() {
+                        self.state.complete = false;
+                        return Err(HsrError::new(
+                            "HSR-CAPTURE-UID",
+                            UID_HINT,
+                            format!(
+                                "selected data decoded without a verified login UID; dispatchKey={:?}; conversation={conv_id}",
+                                decoded.dispatch_key_id
+                            ),
+                        ));
+                    }
                     if self.state.has_characters
                         || self.state.has_light_cones
                         || self.state.has_relics
@@ -236,10 +251,6 @@ impl HsrPacketDecoder {
                         }
                         self.clear_inventory_session();
                         self.conversation = Some(conv_id);
-                        // Unknown protocol identity can still provide an anonymous
-                        // baseline after a trusted new transport start, never from
-                        // delayed packets belonging to a retired account.
-                        self.identity_required = false;
                     },
                     // A request has no scoped conversation ID. Wait for the
                     // establishment/token instead of invalidating another account
@@ -256,7 +267,8 @@ impl HsrPacketDecoder {
         Ok(())
     }
 
-    /// Decrypted-command replay; wrappers and command IDs are not assumed.
+    /// Diagnostic decrypted-command replay; it cannot establish account identity.
+    /// Public capture exports still require a verified incoming login UID.
     pub fn receive_command(&mut self, bytes: &[u8]) -> HsrResult<()> {
         self.receive_inventory_command(bytes, None)
     }
@@ -315,14 +327,17 @@ impl HsrPacketDecoder {
         };
     }
 
+    fn begin_login_session(&mut self, conv_id: u32) {
+        if let Some(previous) = self.conversation.filter(|previous| *previous != conv_id) {
+            self.retired_conversations.insert(previous);
+        }
+        self.clear_inventory_session();
+        self.conversation = Some(conv_id);
+    }
+
     fn receive_identity(&mut self, conv_id: u32, update: IdentityUpdate) {
         if update.new_login {
-            if let Some(previous) = self.conversation.filter(|previous| *previous != conv_id) {
-                self.retired_conversations.insert(previous);
-            }
-            self.clear_inventory_session();
-            self.identity_required = true;
-            self.conversation = Some(conv_id);
+            self.begin_login_session(conv_id);
             self.account = Some(update.account);
         } else if self.conversation == Some(conv_id)
             && self
@@ -334,12 +349,15 @@ impl HsrPacketDecoder {
             // Metadata changes must be observable even without an item mutation.
             self.inventory.revision += 1;
         }
+        if let Some(account) = &self.account {
+            self.state.export_details.uid = Some(u64::from(account.uid));
+            self.state.export_details.nickname = account.nickname.clone();
+        }
     }
 
     fn reset(&mut self) {
         self.sniffer = GameSniffer::new().set_initial_keys(self.dispatch_keys.clone());
         self.clear_inventory_session();
-        self.identity_required = false;
         self.retired_conversations.clear();
     }
 }
@@ -361,7 +379,8 @@ pub struct HsrCaptureState {
     pub listener_ready: bool,
     pub elapsed_secs: u64,
     pub capturing: bool,
-    /// True only after all selected categories arrive.
+    /// All selected categories decoded. Full packet capture also requires UID;
+    /// diagnostic command-only replay cannot authorize a public export.
     pub complete: bool,
     /// Actual token/session-seed capture, independent of decoded command counts.
     pub has_key_exchange: bool,
@@ -387,7 +406,7 @@ pub struct HsrCaptureState {
 
 impl HsrCaptureState {
     pub fn diagnostics(&self) -> String {
-        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; keyExchange={}; characters={}; lightCones={}; relics={}; achievements={}; missingDispatchKey={:?}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.has_key_exchange, self.character_count, self.light_cone_count, self.relic_count, self.achievement_count, self.missing_dispatch_key, self.last_transport_error.as_deref().unwrap_or("none"))
+        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; keyExchange={}; uidVerified={}; characters={}; lightCones={}; relics={}; achievements={}; missingDispatchKey={:?}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.has_key_exchange, self.export_details.uid.is_some(), self.character_count, self.light_cone_count, self.relic_count, self.achievement_count, self.missing_dispatch_key, self.last_transport_error.as_deref().unwrap_or("none"))
     }
     /// Single HSR-Scanner v4 JSON, including optional achievement and Trailblazer extensions.
     pub fn build_scanner_export(
@@ -402,6 +421,13 @@ impl HsrCaptureState {
                     "Capture is not complete, so nothing can be exported.",
                 ),
                 "build_scanner_export requires a complete capture",
+            ));
+        }
+        if self.export_details.uid.is_none_or(|uid| uid < 100_000_000) {
+            return Err(HsrError::new(
+                "HSR-CAPTURE-UID",
+                UID_HINT,
+                "a public packet capture export requires a verified incoming login UID",
             ));
         }
         let owned;
@@ -662,6 +688,8 @@ impl HsrCaptureMonitor {
             } else if !state.has_key_exchange {
                 LocalizedText::new("已收到网络流量，但未捕获登录握手。请在启动游戏前开始抓包，再重新登录；若仍失败，请更新 GGScanner。",
                     "Traffic was received, but the login handshake was not captured. Start capture before launching the game, then log in again. If it still fails, update GGScanner.")
+            } else if state.export_details.uid.is_none() {
+                UID_HINT
             } else {
                 LocalizedText::new("已读取游戏流量，但数据尚不完整。请重新登录抓包；若仍失败，请复制完整错误。",
                     "Game traffic was decoded, but some data is missing. Capture a new login; if it fails again, copy the full error.")
@@ -700,8 +728,15 @@ impl HsrCaptureMonitor {
         yas::log_error!("星铁抓包失败：{}", "HSR capture failed: {}", error);
         self.stop_capture();
         if let Ok(mut state) = self.state.lock() {
-            state.complete = false;
-            state.error = Some(error);
+            // One datagram can release a login reset and several KCP commands
+            // before decoding fails. Publish that reset rather than retaining
+            // the previous account's UID/inventory in the shared status.
+            let mut snapshot = self.decoder.state().clone();
+            snapshot.listener_ready = state.listener_ready;
+            snapshot.elapsed_secs = state.elapsed_secs;
+            snapshot.complete = false;
+            snapshot.error = Some(error);
+            *state = snapshot;
             if let Some(observer) = &self.continuous {
                 observer(&state);
             }
@@ -1062,6 +1097,30 @@ mod tests {
         assert!(message.contains("packets=12"));
         assert!(message.contains("decryptedCommands=0"));
         assert!(message.contains("missingDispatchKey=Some(2920436228)"));
+    }
+
+    #[test]
+    fn timeout_with_a_handshake_but_no_verified_uid_explains_how_to_retry() {
+        let shared = Arc::new(Mutex::new(HsrCaptureState::default()));
+        shared.lock().unwrap().listener_ready = true;
+        let mut monitor = HsrCaptureMonitor::new(
+            shared.clone(),
+            crate::load_embedded_gilore_reference().unwrap(),
+            CaptureTargets::default(),
+        )
+        .unwrap();
+        monitor.decoder.state.packet_count = 12;
+        monitor.decoder.state.command_count = 4;
+        monitor.decoder.state.has_key_exchange = true;
+        monitor.started = Some(
+            tokio::time::Instant::now() - std::time::Duration::from_secs(CAPTURE_TIMEOUT_SECS + 1),
+        );
+        monitor.check_timeout();
+        let state = shared.lock().unwrap();
+        let error = state.error.as_ref().unwrap();
+        assert!(error.hint().en.contains("UID could not be verified"));
+        assert!(error.hint().en.contains("log in after starting capture"));
+        assert!(!state.complete);
     }
 
     #[test]

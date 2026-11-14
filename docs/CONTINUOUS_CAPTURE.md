@@ -10,7 +10,7 @@ rules apply. Responses use `Cache-Control: no-store`.
 | HTTP | `error` | Meaning |
 | --- | --- | --- |
 | 409 | `continuous_capture_disabled` | This server session has no continuous listener. Enable it before starting the server. |
-| 503 | `continuous_capture_no_data` | Enabled, but the initial character and equipment inventory has not been parsed yet. Keep polling. |
+| 503 | `continuous_capture_no_data` | Enabled, but verified login identity and the initial character/equipment inventory are not ready yet. Keep polling and log in after starting the listener. |
 | 503 | `continuous_capture_failed` | Listener initialization, decoding, or capture failed. `details` contains diagnostics. Restart the server after fixing the cause. |
 | 200 | — | Latest parsed inventory is available. |
 
@@ -80,24 +80,26 @@ not block inventory availability. Star Rail continuous inventory excludes quests
 ## Account routing
 
 Enabling automatic sync authorizes the websites to apply subsequent snapshots
-without repeated session approval. Identified snapshots route by their game UID,
-not the currently viewed profile. Previously unknown UIDs create a profile or
-bind the existing unbound Default when no matching UID profile exists. An existing
-UID profile always wins over Default promotion; unrelated profiles are retained.
+without repeated session approval. Snapshots route by their game UID to the
+matching account, creating one when necessary, regardless of the currently
+viewed profile. Default and unrelated accounts are retained. Data without a UID
+routes to Default. This is the websites' import fallback; successful GGScanner
+packet captures always have a verified UID.
 
 Genshin capture provides `metadata.uid` from its verified incoming login
 response. It clears identity together with inventory on a new login, including
 reconnects to the same UID, and waits for identity plus the initial inventory
 before publishing. Unsupported login identity layouts report a capture error.
-No player nickname is currently exported. Legacy unidentified snapshots use the
-website's one explicitly enabled fallback profile. No UID is guessed from
+No player nickname is currently exported. No UID is guessed from
 arbitrary scalar fields or character names. See `GENSHIN_EXPORT.md` for the
 reviewed protocol layout and validation boundary.
 
 Star Rail's reviewed login layout provides UID and optional nickname from the
-same incoming KCP conversation as its inventory. Normal and continuous capture
-exports carry them in `metadata`. Other layouts remain unidentified and use the
-same selected-profile fallback. Public UID is account identity, not a credential.
+same incoming KCP conversation as its inventory. Both one-time and continuous
+capture require verified identity and carry the UID in `metadata`. If the login
+layout is unsupported, a capture error explains how to update and log in again;
+complete inventory alone cannot produce a successful anonymous export.
+Public UID is account identity, not a credential.
 No authentication tokens or key material are exported.
 
 Packet captures with a validated UID and aligned instance identities mark

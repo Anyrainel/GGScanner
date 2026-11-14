@@ -24,7 +24,7 @@ compatibility with existing exports.
 | `source` | `"HSR-Scanner"` (format discriminator, not the binary name) |
 | `build` | `"v1.2.0"` (Fribbels compatibility identifier) |
 | `version` | `4` |
-| `metadata.uid` | Screenshot scans: the account UID (integer) read from the bottom-left on-screen watermark, accepted once two panels read the same value, else `null`. Packet capture: the UID from the reviewed incoming token response, tied to the inventory’s KCP conversation; `null` if not verified. Continuous sync consumers may use it to select the matching game account. |
+| `metadata.uid` | Screenshot scans: the account UID (integer) read from the bottom-left on-screen watermark, accepted once two panels read the same value, else `null`. One-time and continuous packet capture: required verified UID from the reviewed incoming token response, tied to the inventory's KCP conversation. Unverified packet captures wait or fail instead of successfully exporting `null`. Automatic website sync routes by UID to the matching account; UID-absent data uses Default. |
 | `metadata.trailblazer` | `"Stelle"` or `"Caelus"`, else `null` |
 | `characters[]` | `id` (string), `name`, `path`, `level`, `ascension`, `eidolon`. Packet captures also include `ability_version` and single-unlock `traces` flags. Screenshot OCR fills upgradeable `skills` (Basic, Skill, Ultimate, Talent, plus `elation` on Elation characters) and optional `memosprite` levels. Screenshot scans do not read or export one-time trace-node flags; `traces.special` is such a flag, separate from the upgradeable `skills.elation` level. `ability_version` is omitted because it is not on-screen text. |
 | `light_cones[]` | `id` (string), `name`, `level`, `ascension`, `superimposition`, `location`, `lock`, `_uid` |
@@ -39,7 +39,7 @@ Preservation, Abundance, Remembrance, Elation.
 instance records; `_uid` is a stable lowercase SHA-256 hex string scoped to that
 game account and item family. Upgrading an item or reconnecting the same account
 preserves it; another account gets different IDs. Without that exact flag,
-including OCR and anonymous exports, `_uid` remains a scan-order synthetic ID.
+including OCR and older anonymous exports, `_uid` remains a scan-order synthetic ID.
 `metadata.nickname`, when present, is the same login’s in-game display name; it
 is mutable and nonunique and must never be used as an account matching key.
 Internal semantic observations and manager schemas remain anonymous.

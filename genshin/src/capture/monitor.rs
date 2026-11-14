@@ -112,6 +112,7 @@ impl Default for CaptureState {
 impl CaptureState {
     fn selected_complete(&self, targets: &CaptureExportSettings) -> bool {
         self.capturing
+            && self.uid.is_some()
             && (!targets.include_characters || self.has_characters)
             && (!targets.include_weapons || self.has_items || self.weapon_count > 0)
             && (!targets.include_artifacts || self.has_items || self.artifact_count > 0)
@@ -119,7 +120,7 @@ impl CaptureState {
     }
 
     pub fn diagnostics(&self) -> String {
-        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; rejectedCommands={}; unmatchedCommands={}; keyExchange={}; characters={}; weapons={}; artifacts={}; achievements={}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.rejected_commands, self.unmatched_commands, self.has_key_exchange, self.character_count, self.weapon_count, self.artifact_count, self.achievement_count, self.last_transport_error.as_deref().unwrap_or("none"))
+        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; rejectedCommands={}; unmatchedCommands={}; keyExchange={}; uidVerified={}; characters={}; weapons={}; artifacts={}; achievements={}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.rejected_commands, self.unmatched_commands, self.has_key_exchange, self.uid.is_some(), self.character_count, self.weapon_count, self.artifact_count, self.achievement_count, self.last_transport_error.as_deref().unwrap_or("none"))
     }
 
     pub fn timeout_hint(&self) -> (&'static str, &'static str) {
@@ -134,6 +135,8 @@ impl CaptureState {
             ("已收到流量，但未成功解码游戏消息。请重新登录并更新抓包器，复制完整错误以检查协议或密钥兼容性。", "Traffic arrived but no game messages decoded. Capture a new login and update the scanner. Copy the full error to check protocol or key compatibility.")
         } else if !self.has_key_exchange {
             ("已解码部分消息，但未捕获登录握手。请关闭游戏，在开始抓包后重新登录。", "Some messages decoded but the login handshake was not captured. Close the game and log in after starting capture.")
+        } else if self.uid.is_none() {
+            ("尚未验证游戏 UID。请更新 GGScanner，并在开始抓包后重新登录；若仍失败，请复制完整错误。", "The game UID has not been verified. Update GGScanner and log in after starting capture; if this persists, copy the full error.")
         } else {
             ("已解码游戏消息，但尚未收到全部所选数据。需要成就时请打开成就界面；若仍失败，请复制完整错误。", "Game messages decoded but selected data is incomplete. Open Achievements if selected; if this persists, copy the full error.")
         }
@@ -290,6 +293,10 @@ impl CaptureMonitor {
             return Err(anyhow!(error));
         }
         if state.complete {
+            anyhow::ensure!(
+                self.player_data.uid().is_some(),
+                "A completed Genshin packet capture must have a verified game UID."
+            );
             return self.player_data.export(settings).map(Some);
         }
         Ok(None)
@@ -437,8 +444,10 @@ impl CaptureMonitor {
                         "登录响应中的游戏 UID 无法验证，请更新扫描器后重新登录。",
                         "The login response's game UID could not be verified. Update the scanner and log in again."
                     );
+                    let error = "The Genshin login UID could not be verified. Update GGScanner and log in again.";
+                    self.state.lock().expect("capture state poisoned").error = Some(error.into());
                     if let Some(latest) = &self.continuous {
-                        latest.fail("The Genshin login UID could not be verified. Update GGScanner and log in again.".into());
+                        latest.fail(error.into());
                     }
                 }
                 continue;
@@ -1109,6 +1118,8 @@ mod tests {
         state.command_count = 3;
         assert!(state.timeout_hint().1.contains("login handshake"));
         state.has_key_exchange = true;
+        assert!(state.timeout_hint().1.contains("UID has not been verified"));
+        state.uid = Some(800_000_001);
         assert!(state
             .timeout_hint()
             .1
@@ -1132,6 +1143,7 @@ mod tests {
     fn selected_targets_determine_completion() {
         let state = CaptureState {
             capturing: true,
+            uid: Some(800_000_001),
             has_achievements: true,
             ..CaptureState::default()
         };
@@ -1146,6 +1158,7 @@ mod tests {
         assert!(!state.selected_complete(&targets));
         let weapons_only = CaptureState {
             capturing: true,
+            uid: Some(800_000_001),
             weapon_count: 5,
             ..CaptureState::default()
         };
@@ -1153,6 +1166,11 @@ mod tests {
         targets.include_achievements = false;
         targets.include_weapons = true;
         assert!(weapons_only.selected_complete(&targets));
+        assert!(!CaptureState {
+            uid: None,
+            ..weapons_only
+        }
+        .selected_complete(&targets));
     }
 
     const ITEMS_BIN: &[u8] = include_bytes!("testdata/items.bin");
@@ -1210,6 +1228,7 @@ mod tests {
         let mut monitor = test_monitor(CaptureState {
             capturing: true,
             complete: true,
+            uid: Some(800_000_001),
             has_characters: true,
             has_items: true,
             has_achievements: true,
@@ -1219,6 +1238,7 @@ mod tests {
         let dump = PacketDump::new(&root).unwrap();
         let session = dump.directory().to_owned();
         monitor.packet_dump = Some(dump);
+        monitor.player_data.set_uid(Some(800_000_001));
         monitor.player_data.process_achievements(&[80001]);
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
@@ -1241,6 +1261,7 @@ mod tests {
         .unwrap()
         .expect("completed capture must return its export");
         assert_eq!(export.achievements, Some(vec![80001]));
+        assert_eq!(export.metadata.unwrap().uid.as_deref(), Some("800000001"));
         let record: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(session.join("diagnostics.jsonl")).unwrap(),
         )
@@ -2070,6 +2091,67 @@ mod tests {
             .export(&CaptureExportSettings::default())
             .unwrap();
         assert_eq!(normal.metadata.unwrap().uid.as_deref(), Some("800000001"));
+    }
+
+    #[tokio::test]
+    async fn one_time_packet_capture_exports_the_verified_login_uid() {
+        let (mut monitor, _) = identity_test_monitor();
+        monitor.continuous = None;
+        monitor.targets.include_achievements = false;
+        identity_begin_login(&mut monitor, 11, 800_000_001);
+        assert!(!monitor.state.lock().unwrap().complete);
+        identity_publish_inventory(&mut monitor, 11, 1000);
+        assert!(monitor.state.lock().unwrap().complete);
+        let (_sender, receiver) = mpsc::unbounded_channel();
+        let settings = monitor.targets.clone();
+        let export = monitor
+            .run_capture(receiver, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(export.metadata.unwrap().uid.as_deref(), Some("800000001"));
+        assert_eq!(export.characters.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn one_time_packet_capture_rejects_an_unverified_login_uid() {
+        let (mut monitor, _) = identity_test_monitor();
+        monitor.continuous = None;
+        monitor.targets.include_achievements = false;
+        identity_begin_login(&mut monitor, 11, 0);
+        identity_publish_inventory(&mut monitor, 11, 1000);
+        assert!(!monitor.state.lock().unwrap().complete);
+        let (_sender, receiver) = mpsc::unbounded_channel();
+        let settings = monitor.targets.clone();
+        let error = monitor.run_capture(receiver, &settings).await.unwrap_err();
+        assert!(error.to_string().contains("UID could not be verified"));
+        assert!(error.to_string().contains("log in again"));
+    }
+
+    #[tokio::test]
+    async fn decoded_inventory_without_a_login_uid_cannot_complete_one_time_capture() {
+        let (mut monitor, _) = identity_test_monitor();
+        monitor.continuous = None;
+        monitor.targets.include_achievements = false;
+        monitor.process_packet(identity_control_frame(0xff, None, false));
+        monitor.process_packet(identity_control_frame(0x145, Some(11), true));
+        let (items, avatars) = identity_inventory(1000);
+        monitor.process_packet(identity_kcp_frame(11, 0, &items, true));
+        monitor.process_packet(identity_kcp_frame(11, 1, &avatars, true));
+        {
+            let state = monitor.state.lock().unwrap();
+            assert!(state.has_items && state.has_characters);
+            assert!(!state.complete);
+            assert_eq!(state.uid, None);
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(CaptureCommand::StopCapture).unwrap();
+        let settings = monitor.targets.clone();
+        assert!(monitor
+            .run_capture(receiver, &settings)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
