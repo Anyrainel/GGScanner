@@ -4,9 +4,10 @@
 
 本次更新：
 
-- 全面更新界面，同一套程序支持原神与星铁的抓包、OCR 扫描和装备管理。
-- 改善星铁扫描与遗器管理，修复近期的数据识别和操作校验问题。
-- 修复扫描停止条件、窗口识别与图像读取中的多处问题。
+- 新增原神与星铁持续同步，按 UID 匹配网站账号，并同步已移除的装备。
+- 单次与持续抓包均会校验 UID，避免不同账号的数据混在一起。
+- 适配星铁 4.7 抓包，并更新角色、光锥及遗器数据。
+- 改善圣遗物扫描与装备管理的识别稳定性，优化首次运行所需文件的下载。
 
 | 下载版本 | 功能 |
 | --- | --- |
@@ -23,9 +24,10 @@ Export your account data and manage your gear in Genshin Impact and Honkai: Star
 
 In this update:
 
-- Redesigned the interface, with capture, OCR scanning, and gear management for both Genshin Impact and Star Rail in one application.
-- Improved Star Rail scanning and Relic management, including recent data recognition and operation validation fixes.
-- Fixed issues with scan stopping conditions, window detection, and image capture.
+- Added continuous sync for Genshin Impact and Star Rail, matching website accounts by UID and keeping removed gear in sync.
+- One-time and continuous captures now verify the account UID to keep accounts separate.
+- Updated Star Rail capture and Character, Light Cone, and Relic data for version 4.7.
+- Improved artifact scanning and gear management reliability, along with first-run downloads.
 
 | Download | Features |
 | --- | --- |
