@@ -82,6 +82,9 @@ trait PanelIo {
     fn cancelled(&mut self) -> bool;
     fn click(&mut self, cell: ArtifactCell);
     fn capture(&mut self, cell: ArtifactCell) -> Result<PanelSample>;
+    fn capture_detail_signature(&mut self, cell: ArtifactCell) -> Result<PanelSignature> {
+        Ok(self.capture(cell)?.signature)
+    }
 }
 
 enum PanelWait {
@@ -107,21 +110,32 @@ fn wait_for_panel(
         .max(initial + FRAME_INTERVAL * 2 + Duration::from_millis(options.extra_delay_ms));
     let deadline = start + budget;
     let hold = FRAME_INTERVAL.max(Duration::from_millis(options.extra_delay_ms));
-    let mut next_sample = start + initial;
-    let mut candidate: Option<(PanelSample, Duration)> = None;
-    let mut captures = 0;
-    let mut first_change = None;
+
+    if io.cancelled() {
+        return Ok(PanelWait::Cancelled);
+    }
+    io.sleep(initial);
+    if io.cancelled() {
+        return Ok(PanelWait::Cancelled);
+    }
+    // Only the confirming frame needs the grid and full-resolution OCR input.
+    // Poll the same detail pixels in a much cheaper crop for the first sample.
+    let first_started = io.now();
+    let mut previous = io.capture_detail_signature(cell)?;
+    let mut stable_since = io.now();
+    let mut next_sample = first_started + FRAME_INTERVAL;
+    let mut final_confirmation = false;
+    let mut captures = 1;
+    let mut first_change =
+        (!previous.similar(baseline)).then_some((stable_since - start).as_millis());
     let mut first_selection = None;
     loop {
         if io.cancelled() {
             return Ok(PanelWait::Cancelled);
         }
         let now = io.now();
-        if now > deadline {
-            break;
-        }
         if next_sample > now {
-            io.sleep((next_sample - now).min(deadline - now));
+            io.sleep(next_sample - now);
         }
         if io.cancelled() {
             return Ok(PanelWait::Cancelled);
@@ -134,11 +148,9 @@ fn wait_for_panel(
         // capture itself already took that long.
         next_sample = sample_started + FRAME_INTERVAL;
         let changed = !sample.signature.similar(baseline);
-        let stable_since = candidate
-            .as_ref()
-            .filter(|(previous, _)| sample.signature.similar(&previous.signature))
-            .map(|(_, since)| *since)
-            .unwrap_or(observed);
+        if !previous.readable || !sample.signature.similar(&previous) {
+            stable_since = observed;
+        }
         let usable = sample.signature.readable && !sample.card_absent;
         let selected = sample.selected || already_selected;
         if changed {
@@ -147,13 +159,12 @@ fn wait_for_panel(
         if selected {
             first_selection.get_or_insert((observed - start).as_millis());
         }
-        if observed <= deadline
-            && usable
+        let eligible = usable
             && selected
             && expected.is_none_or(|expected| expected.similar(&sample.signature))
-            && (changed || allow_unchanged)
-            && observed.saturating_sub(stable_since) >= hold
-        {
+            && (changed || allow_unchanged);
+        let stable = observed.saturating_sub(stable_since) >= hold;
+        if eligible && stable {
             yas::log_debug!(
                 "[artifact] 详情就绪: {}ms，采样{}次，首次内容变化={:?}ms，首次确认选中={:?}ms",
                 "[artifact] Detail ready: {}ms, {} samples, first content change={:?}ms, first selection confirmation={:?}ms",
@@ -161,20 +172,26 @@ fn wait_for_panel(
             );
             return Ok(PanelWait::Ready(sample));
         }
-        // Blank/partial frames cannot accumulate stable time.
-        candidate = sample.signature.readable.then_some((sample, stable_since));
+        let can_confirm = eligible || (!changed && sample.signature.readable);
         if observed >= deadline {
-            break;
+            if final_confirmation || stable || !can_confirm {
+                return Ok(if stable && sample.signature.readable && !changed {
+                    PanelWait::Unchanged(sample)
+                } else {
+                    PanelWait::Unstable
+                });
+            }
+            // The deadline bounds the search for a candidate. A capture
+            // already underway can finish past it, especially at 4K. Allow
+            // that candidate one last observation to prove stability. A
+            // changing frame cannot push the deadline out repeatedly.
+            final_confirmation = true;
+            next_sample = next_sample.max(stable_since + hold);
+        } else {
+            next_sample = next_sample.min(deadline);
         }
+        previous = sample.signature;
     }
-    Ok(match candidate {
-        Some((sample, since))
-            if io.now().saturating_sub(since) >= hold && sample.signature.similar(baseline) =>
-        {
-            PanelWait::Unchanged(sample)
-        },
-        _ => PanelWait::Unstable,
-    })
 }
 
 impl ArtifactPanelWaiter {
@@ -210,7 +227,7 @@ impl ArtifactPanelWaiter {
         }
         let baseline = match &self.last {
             Some(last) => last.signature.clone(),
-            None => io.capture(cell)?.signature,
+            None => io.capture_detail_signature(cell)?,
         };
         let already_selected = self.last.as_ref().is_some_and(|last| last.cell == cell);
         let expected = self
@@ -359,7 +376,7 @@ fn has_text(samples: &[u8]) -> bool {
         >= 6
 }
 
-fn observe(frame: CaptureFrame, scaler: &CoordScaler, cell: ArtifactCell) -> PanelSample {
+fn panel_signature(frame: &CaptureFrame, scaler: &CoordScaler) -> PanelSignature {
     // Exclude illustration, cursor, animated lock/star icons and selection glow.
     // Both normal and +40px layouts are covered by the lower text regions.
     let regions: Vec<_> = [
@@ -374,25 +391,28 @@ fn observe(frame: CaptureFrame, scaler: &CoordScaler, cell: ArtifactCell) -> Pan
         (1508.0, 410.0, 36.0, 35.0),
     ]
     .into_iter()
-    .map(|rect| region_samples(&frame, scaler, rect))
+    .map(|rect| region_samples(frame, scaler, rect))
     .collect();
     let readable = has_text(&regions[1]) && has_text(&regions[2]) && has_text(&regions[3]);
+    PanelSignature { regions, readable }
+}
+
+fn observe(frame: CaptureFrame, scaler: &CoordScaler, cell: ArtifactCell) -> PanelSample {
+    let signature = panel_signature(&frame, scaler);
     let (x, y) = artifact_cell_center(cell.row, cell.col);
-    // Look for the neutral bright selection rim on multiple sides, outside the
-    // illustration and level band. Sample a band to tolerate grid Y drift.
-    let mut selected_sides = 0;
-    for side in [-1.0, 1.0] {
-        let mut hits = 0;
-        for dy in (-50..50).step_by(4) {
-            let bright = (59..69).any(|dx| {
+    // The neutral selection rim has both sides at the same height. The
+    // filter overlay on the bottom row can brighten the two sides separately.
+    let mut rim_rows = 0;
+    for dy in (-50..50).step_by(4) {
+        let both_sides = [-1.0, 1.0].into_iter().all(|side| {
+            (59..69).any(|dx| {
                 let rgb = frame.pixel(scaler, x + side * dx as f64, y + dy as f64);
                 let lo = *rgb.iter().min().unwrap();
                 let hi = *rgb.iter().max().unwrap();
                 lo > 180 && hi - lo < 55
-            });
-            hits += usize::from(bright);
-        }
-        selected_sides += usize::from(hits >= 12);
+            })
+        });
+        rim_rows += usize::from(both_sides);
     }
     let interior = region_samples(&frame, scaler, (x - 40.0, y - 40.0, 80.0, 80.0));
     let range = interior
@@ -401,8 +421,8 @@ fn observe(frame: CaptureFrame, scaler: &CoordScaler, cell: ArtifactCell) -> Pan
         .fold((255, 0), |(lo, hi), value| (lo.min(value), hi.max(value)));
     PanelSample {
         frame,
-        signature: PanelSignature { regions, readable },
-        selected: selected_sides == 2,
+        signature,
+        selected: rim_rows >= 12,
         // Uniform dark inventory background is independent evidence. Unknown
         // artwork is never treated as empty merely because text stayed still.
         card_absent: range.1 < 140 && range.1 - range.0 < 18,
@@ -433,6 +453,10 @@ impl PanelIo for ControllerIo<'_> {
     fn capture(&mut self, cell: ArtifactCell) -> Result<PanelSample> {
         let frame = CaptureFrame::full(self.ctrl.capture_game()?);
         Ok(observe(frame, &self.ctrl.scaler, cell))
+    }
+    fn capture_detail_signature(&mut self, _: ArtifactCell) -> Result<PanelSignature> {
+        let detail = CaptureFrame::from_region(self.ctrl, ARTIFACT_DETAIL_PANEL_RECT)?;
+        Ok(panel_signature(&detail, &self.ctrl.scaler))
     }
 }
 
@@ -534,6 +558,7 @@ mod tests {
         clicks: Vec<(ArtifactCell, Duration)>,
         captures: u8,
         capture_ms: u64,
+        detail_capture_ms: Option<u64>,
         cancel_at: Option<Duration>,
         fail_capture: bool,
     }
@@ -548,9 +573,23 @@ mod tests {
                 clicks: vec![],
                 captures: 0,
                 capture_ms: 0,
+                detail_capture_ms: None,
                 cancel_at: None,
                 fail_capture: false,
             }
+        }
+        fn sample_after(&mut self, capture_ms: u64) -> Result<Step> {
+            anyhow::ensure!(!self.fail_capture, "capture unavailable");
+            self.time += Duration::from_millis(capture_ms);
+            self.captures += 1;
+            let elapsed = (self.time - self.clicked_at).as_millis() as u64;
+            Ok(self
+                .active
+                .iter()
+                .rev()
+                .find(|s| s.at <= elapsed)
+                .unwrap()
+                .clone())
         }
     }
 
@@ -572,17 +611,18 @@ mod tests {
             self.clicks.push((cell, self.time));
         }
         fn capture(&mut self, _: ArtifactCell) -> Result<PanelSample> {
-            anyhow::ensure!(!self.fail_capture, "capture unavailable");
-            self.time += Duration::from_millis(self.capture_ms);
-            self.captures += 1;
-            let elapsed = (self.time - self.clicked_at).as_millis() as u64;
-            let state = self.active.iter().rev().find(|s| s.at <= elapsed).unwrap();
+            let state = self.sample_after(self.capture_ms)?;
             Ok(PanelSample {
                 frame: CaptureFrame::full(RgbImage::from_pixel(1, 1, Rgb([self.captures, 0, 0]))),
-                signature: state.signature.clone(),
+                signature: state.signature,
                 selected: state.selected,
                 card_absent: state.absent,
             })
+        }
+        fn capture_detail_signature(&mut self, _: ArtifactCell) -> Result<PanelSignature> {
+            Ok(self
+                .sample_after(self.detail_capture_ms.unwrap_or(self.capture_ms))?
+                .signature)
         }
     }
 
@@ -745,6 +785,85 @@ mod tests {
     }
 
     #[test]
+    fn slow_capture_can_finish_confirming_a_candidate_after_the_timeout() {
+        let config = ArtifactPanelOptions {
+            timeout_ms: 100,
+            ..options()
+        };
+        let mut io = ScriptIo::new(vec![(TARGET, vec![step(0, 90, true)])]);
+        // A local 4K BitBlt frame takes ~66ms. With the 20ms initial wait,
+        // even two immediately stable captures cannot finish within 100ms.
+        io.capture_ms = 66;
+        assert!(matches!(
+            seeded().select(&mut io, TARGET, config).unwrap(),
+            ArtifactSelection::Ready(_)
+        ));
+        assert_eq!(io.clicks.len(), 1);
+        assert_eq!(io.captures, 2);
+        assert_eq!(io.time, Duration::from_millis(152));
+    }
+
+    #[test]
+    fn first_detail_crop_and_one_full_frame_confirm_a_4k_selection() {
+        let mut io = ScriptIo::new(vec![(TARGET, vec![step(0, 90, true)])]);
+        io.detail_capture_ms = Some(16);
+        io.capture_ms = 66;
+        let config = ArtifactPanelOptions {
+            timeout_ms: 100,
+            ..options()
+        };
+        let ArtifactSelection::Ready(frame) = seeded().select(&mut io, TARGET, config).unwrap()
+        else {
+            panic!("confirmed detail was discarded");
+        };
+        assert_eq!(io.clicks.len(), 1);
+        assert_eq!(io.captures, 2);
+        assert_eq!(frame.image.get_pixel(0, 0)[0], io.captures);
+        assert_eq!(io.time, Duration::from_millis(103));
+    }
+
+    #[test]
+    fn detail_crop_and_full_capture_sample_identical_pixels() {
+        let full = CaptureFrame::full(
+            image::load_from_memory(include_bytes!("../../../tests/fixtures/artifact_panel.png"))
+                .unwrap()
+                .to_rgb8(),
+        );
+        let scaler = CoordScaler::new(full.image.width(), full.image.height());
+        let rect = ARTIFACT_DETAIL_PANEL_RECT;
+        let cropped = CaptureFrame {
+            image: full.crop(rect, 0.0, &scaler).unwrap(),
+            origin: (rect.0, rect.1),
+        };
+        let reference = panel_signature(&full, &scaler);
+        let detail = panel_signature(&cropped, &scaler);
+        assert!(reference.readable && detail.readable);
+        assert_eq!(reference.regions, detail.regions);
+    }
+
+    #[test]
+    fn late_candidate_gets_one_confirmation_and_cannot_extend_an_unstable_wait() {
+        let config = ArtifactPanelOptions {
+            timeout_ms: 100,
+            ..options()
+        };
+        for (last_value, ready) in [(90, true), (120, false)] {
+            let mut io = ScriptIo::new(vec![]);
+            io.capture_ms = 66;
+            io.active = vec![
+                step(0, 40, false),
+                step(90, 90, true),
+                step(175, last_value, true),
+            ];
+            let result =
+                wait_for_panel(&mut io, TARGET, &signature(40), false, false, None, config)
+                    .unwrap();
+            assert_eq!(matches!(result, PanelWait::Ready(_)), ready);
+            assert_eq!(io.captures, 3);
+        }
+    }
+
+    #[test]
     fn extra_delay_is_revalidated_and_capture_time_counts_toward_cadence() {
         let mut io = ScriptIo::new(vec![(TARGET, vec![step(0, 90, true), step(70, 100, true)])]);
         io.capture_ms = 20;
@@ -832,6 +951,28 @@ mod tests {
             assert!(!neighbor.selected, "unselected card mistaken for selected");
             assert!(!neighbor.card_absent);
         }
+    }
+
+    #[test]
+    fn bottom_row_filter_overlay_does_not_confirm_an_unselected_card() {
+        // This 4K inventory crop has bright pixels at 13 sampled heights on
+        // the left edge and 12 on the right, but only 11 at matching heights.
+        let image = image::load_from_memory(include_bytes!(
+            "../../../tests/fixtures/artifact_filter_overlay.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        let frame = CaptureFrame {
+            image,
+            origin: (402.0, 900.0),
+        };
+        let sample = observe(
+            frame,
+            &CoordScaler::new(3840, 2160),
+            ArtifactCell { row: 4, col: 2 },
+        );
+        assert!(!sample.card_absent);
+        assert!(!sample.selected);
     }
 
     #[test]
