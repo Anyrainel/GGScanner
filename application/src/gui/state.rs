@@ -546,6 +546,7 @@ pub enum UpdateState {
     Available {
         latest_version: String,
         download_url: String,
+        exe_path: std::path::PathBuf,
     },
     /// Download is in progress.
     Downloading,

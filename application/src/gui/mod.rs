@@ -115,11 +115,7 @@ fn run_gui_with_agent_mode(agent_mode: bool) {
     // ALL threads — worker, update, refresh, and GUI main.
     install_panic_hook();
 
-    // Clean up the previous update only after logging is ready, so even this
-    // non-fatal startup failure retains its readable hint and inner error.
-    genshin_scanner::updater::cleanup_old_exe();
-
-    // Kick off background update check for the executable that is running.
+    // Prepare the local executable and check for updates after logging is ready.
     #[cfg(all(feature = "capture", target_os = "windows"))]
     const UPDATE_ASSET: &str = genshin_scanner::updater::ASSET_CAPTURE;
     #[cfg(not(all(feature = "capture", target_os = "windows")))]
@@ -153,9 +149,6 @@ fn run_gui_with_agent_mode(agent_mode: bool) {
         ..Default::default()
     };
 
-    // Cloned before `state` moves into `GuiApp`: an update-triggered restart is
-    // detected after `run_native` returns.
-    let update_state = state.update_state.clone();
     if let Err(error) = eframe::run_native(
         PRODUCT_NAME,
         options,
@@ -185,12 +178,6 @@ fn run_gui_with_agent_mode(agent_mode: bool) {
         );
         log::error!(target: yas::lang::LOCALIZED_LOG_TARGET, "{}", failure.hint_text(lang));
         show_startup_error(PRODUCT_NAME, lang, &failure);
-    }
-    if matches!(
-        *update_state.lock().unwrap(),
-        UpdateState::RestartRequested(_)
-    ) {
-        restart::exit_for_update();
     }
 }
 
@@ -263,7 +250,6 @@ struct GuiApp {
     splits: layout::Splits,
     logos: shell::Logos,
     data_refresh: data_refresh::DataRefresh,
-    restart_started: bool,
     state: AppState,
     app_config: ApplicationConfigStore,
     star_rail: star_rail_state::StarRailState,
@@ -277,6 +263,25 @@ struct GuiApp {
     desktop_theme: Option<egui::Theme>,
     #[cfg(all(feature = "capture", target_os = "windows"))]
     capture_tab: capture_tab::CaptureTabState,
+}
+
+struct RunningGameTasks {
+    is_scan_running: bool,
+    is_server_running: bool,
+    is_capture_busy: bool,
+    star_rail_scan_running: bool,
+    star_rail_manager_running: bool,
+    star_rail_capture_busy: bool,
+}
+
+impl RunningGameTasks {
+    fn genshin_busy(&self) -> bool {
+        self.is_scan_running || self.is_server_running || self.is_capture_busy
+    }
+
+    fn star_rail_busy(&self) -> bool {
+        self.star_rail_scan_running || self.star_rail_manager_running || self.star_rail_capture_busy
+    }
 }
 
 impl GuiApp {
@@ -300,7 +305,6 @@ impl GuiApp {
             splits: layout::Splits::default(),
             logos: shell::Logos::load(ctx),
             data_refresh: data_refresh::DataRefresh::default(),
-            restart_started: false,
             state,
             app_config,
             star_rail,
@@ -370,6 +374,80 @@ impl GuiApp {
             },
         }
     }
+
+    fn running_game_tasks(&self) -> RunningGameTasks {
+        RunningGameTasks {
+            is_scan_running: self
+                .scan_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished()),
+            is_server_running: self
+                .server_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished()),
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            is_capture_busy: self.capture_tab.is_busy(),
+            #[cfg(not(all(feature = "capture", target_os = "windows")))]
+            is_capture_busy: false,
+            star_rail_scan_running: self.star_rail.scan_running(),
+            star_rail_manager_running: self.star_rail.manager_running(),
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            star_rail_capture_busy: self.star_rail.capture.is_busy(),
+            #[cfg(not(all(feature = "capture", target_os = "windows")))]
+            star_rail_capture_busy: false,
+        }
+    }
+
+    fn persist_settings(&mut self) {
+        if !self.save_settings {
+            return;
+        }
+        #[cfg(all(feature = "capture", target_os = "windows"))]
+        self.capture_tab.sync_to_config(&mut self.state.user_config);
+        self.state.persist_config_now();
+        if let Err(error) = self.app_config.persist_now() {
+            let failure = state::UiError::from_anyhow(
+                state::UiText::new(
+                    "星穹铁道设置无法保存；请检查完整错误。",
+                    "Star Rail settings could not be saved. Check the full error.",
+                ),
+                &error,
+            );
+            log::error!(target: yas::lang::LOCALIZED_LOG_TARGET, "{}", failure.hint_text(self.state.lang));
+        }
+    }
+
+    fn restart_if_requested(&mut self, ctx: &egui::Context) {
+        let path = match &*self.state.update_state.lock().unwrap() {
+            UpdateState::RestartRequested(path) => path.clone(),
+            _ => return,
+        };
+        let running = self.running_game_tasks();
+        if running.genshin_busy() || running.star_rail_busy() || self.data_refresh.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+
+        self.persist_settings();
+        match restart::launch_updated_app(&path) {
+            Ok(_) => {
+                // The child waits for this process. Quit before the graphics
+                // backend or native libraries can block during teardown.
+                restart::exit_for_update();
+            },
+            Err(error) => {
+                *self.state.update_state.lock().unwrap() = UpdateState::Failed(
+                    state::UiError::from_error(
+                        state::UiText::new(
+                            "更新已安装，但新版本无法自动启动。请手动重新打开程序。",
+                            "The update was installed, but the new version could not start automatically. Reopen the application manually.",
+                        ),
+                        error,
+                    ),
+                );
+            },
+        }
+    }
 }
 
 impl eframe::App for GuiApp {
@@ -388,10 +466,6 @@ impl eframe::App for GuiApp {
         }
         #[cfg(not(target_os = "linux"))]
         ctx.set_theme(theme::preference(self.app_config.config.appearance));
-        if self.restart_started {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
         // Debounced auto-save: check if config changed and save after 300ms
         log_bridge::set_game_verbose(self.state.verbose, self.app_config.config.star_rail.verbose);
         if self.save_settings {
@@ -415,6 +489,7 @@ impl eframe::App for GuiApp {
         self.capture_tab.tick();
 
         self.data_refresh.poll();
+        self.restart_if_requested(ctx);
         // Logic also runs while the viewport is hidden; keep capture/export
         // polling and debounced settings saves moving without painting a frame.
         #[cfg(all(feature = "capture", target_os = "windows"))]
@@ -433,27 +508,17 @@ impl eframe::App for GuiApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
 
-        let is_scan_running = self
-            .scan_handle
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished());
-        let is_server_running = self
-            .server_handle
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished());
-        #[cfg(all(feature = "capture", target_os = "windows"))]
-        let is_capture_busy = self.capture_tab.is_busy();
-        #[cfg(not(all(feature = "capture", target_os = "windows")))]
-        let is_capture_busy = false;
-        let genshin_busy = is_scan_running || is_server_running || is_capture_busy;
-        let star_rail_scan_running = self.star_rail.scan_running();
-        let star_rail_manager_running = self.star_rail.manager_running();
-        #[cfg(all(feature = "capture", target_os = "windows"))]
-        let star_rail_capture_busy = self.star_rail.capture.is_busy();
-        #[cfg(not(all(feature = "capture", target_os = "windows")))]
-        let star_rail_capture_busy = false;
-        let star_rail_busy =
-            star_rail_scan_running || star_rail_manager_running || star_rail_capture_busy;
+        let running = self.running_game_tasks();
+        let genshin_busy = running.genshin_busy();
+        let star_rail_busy = running.star_rail_busy();
+        let RunningGameTasks {
+            is_scan_running,
+            is_server_running,
+            is_capture_busy,
+            star_rail_scan_running,
+            star_rail_manager_running,
+            star_rail_capture_busy,
+        } = running;
         let data_refreshing = self.data_refresh.is_running();
         let game_task_busy = genshin_busy || star_rail_busy || data_refreshing;
 
@@ -481,33 +546,6 @@ impl eframe::App for GuiApp {
                 | UpdateState::ShowingDialog
                 | UpdateState::RestartRequested(_)
         );
-        let restart_path = match self.state.update_state.lock().unwrap().clone() {
-            UpdateState::RestartRequested(path) => Some(path),
-            _ => None,
-        };
-        if let Some(path) = restart_path {
-            if !game_task_busy {
-                match restart::launch_updated_app(&path) {
-                    Ok(_) => {
-                        self.restart_started = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        return;
-                    },
-                    Err(error) => {
-                        *self.state.update_state.lock().unwrap() = UpdateState::Failed(
-                            state::UiError::from_error(
-                                state::UiText::new(
-                                    "更新已安装，但新版本无法自动启动。请手动重新打开程序。",
-                                    "The update was installed, but the new version could not start automatically. Reopen the application manually.",
-                                ),
-                                error,
-                            ),
-                        );
-                    },
-                }
-            }
-        }
-
         // A native worker crash exits the thread without running Rust/native
         // cleanup. Block every game-facing task until the whole application
         // is restarted; retrying in the same process is not safe.
@@ -866,22 +904,7 @@ impl eframe::App for GuiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if !self.save_settings {
-            return;
-        }
-        #[cfg(all(feature = "capture", target_os = "windows"))]
-        self.capture_tab.sync_to_config(&mut self.state.user_config);
-        self.state.persist_config_now();
-        if let Err(error) = self.app_config.persist_now() {
-            let failure = state::UiError::from_anyhow(
-                state::UiText::new(
-                    "星穹铁道设置无法保存；请检查完整错误。",
-                    "Star Rail settings could not be saved. Check the full error.",
-                ),
-                &error,
-            );
-            log::error!(target: yas::lang::LOCALIZED_LOG_TARGET, "{}", failure.hint_text(self.state.lang));
-        }
+        self.persist_settings();
     }
 }
 

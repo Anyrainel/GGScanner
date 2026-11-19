@@ -41,6 +41,7 @@ pub fn run(
                 *state.update_state.lock().unwrap() = UpdateState::Available {
                     latest_version: "v99.0.0".into(),
                     download_url: "https://example.invalid/preview-only".into(),
+                    exe_path: PathBuf::new(),
                 };
             }
             let (mut config, _) = ApplicationConfigStore::for_executable_dir(

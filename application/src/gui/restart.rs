@@ -65,7 +65,7 @@ pub fn wait_for_parent_exit(pid: u32, timeout: Duration) -> io::Result<()> {
     }
 }
 
-/// Called only after the GUI closed and settings were persisted for an update.
+/// Called after application settings are persisted for an update.
 pub fn exit_for_update() -> ! {
     #[cfg(windows)]
     {

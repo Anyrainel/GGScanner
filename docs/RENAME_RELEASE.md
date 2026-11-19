@@ -72,10 +72,14 @@ edition again from either companion website's `/download-scanner` page. Include
 that manual recovery route in the rename announcement. Automatic updates from
 all historical versions are not a requirement after the compatibility cutoff.
 
-The update replaces the executable at its existing local path and restarts that
-path. It deliberately preserves the installed filename and shortcuts; a fresh
-download uses the new names. Existing settings filenames and wire-format IDs
-are independent of the branding and should remain compatible.
+The updater installs the download at the existing path, including when users
+choose to restart later. On its next Windows GUI launch, the migration-capable
+build renames `GOODScanner.exe` to `GGScannerOCR.exe` or `GOODCapture.exe` to
+`GGScanner.exe` in the same directory. Subsequent updates use the new path.
+The rename leaves an existing executable at the target path intact and retries
+on a later launch if the rename is blocked. Shortcuts or scheduled tasks that
+point to the old filename may need to be updated by the user. Existing settings
+filenames and wire-format IDs are independent of the branding.
 This includes the restart environment variable, `goodscanner.hsr.manager-instructions`,
 GOOD's `yas-GOODScanner` source, and Star Rail's historical `generator.name`.
 
@@ -118,6 +122,7 @@ support is added.
 
 - Test legacy manifests and renamed manifest roles, including edition mapping.
 - Test missing executables without switching an OCR installation to capture.
+- Test local migration under both legacy names and when the new name is in use.
 - Test redirect chains and bounded redirect loops with a local HTTP server.
 - Check both editions build and keep capture dependencies feature-gated.
 - Inspect release uploads for canonical and compatibility names before publishing.

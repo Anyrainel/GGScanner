@@ -28,6 +28,7 @@ pub fn show(
         UpdateState::Available {
             ref latest_version,
             ref download_url,
+            ref exe_path,
         } => {
             let current = genshin_scanner::updater::current_version_display();
             let message = egui::RichText::new(l.t(
@@ -58,17 +59,19 @@ pub fn show(
                     .clicked() {
                     let arc = update_state.clone();
                     let url = download_url.clone();
+                    let exe_path = exe_path.clone();
                     let lang = l;
                     *update_state.lock().unwrap() = UpdateState::Downloading;
                     let worker_state = arc.clone();
+                    let worker_ctx = ctx.clone();
                     let spawn_result = std::thread::Builder::new()
                         .name("update-download".to_owned())
                         .spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            genshin_scanner::updater::download_and_replace(&url)
+                            genshin_scanner::updater::download_and_replace(&exe_path, &url)
                         }));
                         match result {
-                            Ok(Ok(exe_path)) => {
+                            Ok(Ok(())) => {
                                 *worker_state.lock().unwrap() = UpdateState::ShowingDialog;
                                 show_restart_dialog(exe_path, worker_state, lang);
                             },
@@ -95,6 +98,7 @@ pub fn show(
                                 *worker_state.lock().unwrap() = UpdateState::Failed(failure);
                             },
                         }
+                        worker_ctx.request_repaint();
                     });
                     if let Err(error) = spawn_result {
                         let failure = UiError::from_error(
@@ -156,7 +160,7 @@ pub fn show(
     });
 }
 
-/// Spawn a background update check.  Returns immediately.
+/// Prepare the local executable and check for updates in the background.
 pub fn spawn_check(asset_name: &'static str, update_state: &Arc<Mutex<UpdateState>>) {
     // Self-update is Windows-only (release assets are .exe); skip silently
     // instead of nagging with a failure banner.
@@ -173,20 +177,24 @@ pub fn spawn_check(asset_name: &'static str, update_state: &Arc<Mutex<UpdateStat
         .name("update-check".to_owned())
         .spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            genshin_scanner::updater::check_for_update(asset_name)
+            use genshin_scanner::updater::{check_for_update, prepare_local_executable};
+
+            let exe_path = prepare_local_executable(asset_name)?;
+            check_for_update(asset_name).map(|status| (exe_path, status))
         }));
         match result {
-            Ok(Ok(genshin_scanner::updater::UpdateStatus::UpdateAvailable {
+            Ok(Ok((exe_path, genshin_scanner::updater::UpdateStatus::UpdateAvailable {
                 latest_version,
                 download_url,
                 ..
-            })) => {
+            }))) => {
                 *state.lock().unwrap() = UpdateState::Available {
                     latest_version,
                     download_url,
+                    exe_path,
                 };
             },
-            Ok(Ok(genshin_scanner::updater::UpdateStatus::ManualDownload { latest_version })) => {
+            Ok(Ok((_, genshin_scanner::updater::UpdateStatus::ManualDownload { latest_version }))) => {
                 let failure = UiError::from_message(
                     UiText::new(
                         format!("发现新版本 {latest_version}，但未找到此版本的程序文件。请前往 GitHub 发布页手动下载。当前版本仍可继续使用。"),

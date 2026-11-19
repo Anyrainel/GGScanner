@@ -20,13 +20,17 @@ use crate::download;
 use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 use serde::Deserialize;
-use yas::{log_debug, log_info, log_warn};
+#[cfg(windows)]
+use yas::log_debug;
+use yas::{log_info, log_warn};
 
 /// Asset filename for the OCR scanner binary.
 pub const ASSET_SCANNER: &str = "GGScannerOCR.exe";
 /// Asset filename for the merged packet capture + OCR/manager binary.
 pub const ASSET_CAPTURE: &str = "GGScanner.exe";
 pub const RELEASES_URL: &str = "https://github.com/Anyrainel/GGScanner/releases/latest";
+const LEGACY_ASSET_SCANNER: &str = "GOODScanner.exe";
+const LEGACY_ASSET_CAPTURE: &str = "GOODCapture.exe";
 
 /// Try the future repository first, while supporting the transition release
 /// before the repository is renamed. Old installed updaters still need release
@@ -80,14 +84,14 @@ struct ResolvedRelease {
 impl ResolvedRelease {
     fn download_url(&self, asset_name: &str) -> Result<Option<String>> {
         let (mapped, legacy, renamed) = match asset_name {
-            ASSET_SCANNER | "GOODScanner.exe" => (
+            ASSET_SCANNER | LEGACY_ASSET_SCANNER => (
                 self.assets.scanner.as_deref(),
-                "GOODScanner.exe",
+                LEGACY_ASSET_SCANNER,
                 ASSET_SCANNER,
             ),
-            ASSET_CAPTURE | "GOODCapture.exe" => (
+            ASSET_CAPTURE | LEGACY_ASSET_CAPTURE => (
                 self.assets.capture.as_deref(),
-                "GOODCapture.exe",
+                LEGACY_ASSET_CAPTURE,
                 ASSET_CAPTURE,
             ),
             _ => return Err(anyhow!("Unknown updater edition: {asset_name}")),
@@ -441,40 +445,80 @@ fn revision_asset_name(asset_name: &str, revision: u32) -> String {
     }
 }
 
-// ── Public: cleanup ──────────────────────────────────────────────
+// ── Public: prepare local installation ────────────────────────────
 
-/// Delete the leftover `.old` executable from a previous update.
-/// Safe to call unconditionally at every startup.
-///
-/// On Windows the old process may still be exiting when the new one starts
-/// (after the "restart now?" dialog), so the file may be locked briefly.
-/// We retry a few times with a short delay before giving up.
-pub fn cleanup_old_exe() {
-    if let Ok(exe) = std::env::current_exe() {
-        let old = exe.with_extension("exe.old");
-        if !old.exists() {
-            return;
-        }
-        for attempt in 0..5 {
-            match std::fs::remove_file(&old) {
-                Ok(()) => {
-                    log_debug!("已清理旧版本", "Cleaned up old exe");
-                    return;
-                },
-                Err(e) => {
-                    if attempt < 4 {
-                        std::thread::sleep(Duration::from_millis(500));
-                    } else {
-                        log_warn!(
-                            "无法清理上次更新留下的旧程序文件；当前版本仍可继续使用。完整错误详情: {}",
-                            "The old application file left by the previous update could not be removed; the current version can still be used. Full error details: {}",
-                            e
-                        );
-                    }
-                },
-            }
+/// Clean up the previous update and migrate a known old filename on startup.
+/// Use the returned path for subsequent updates: Windows can report the original
+/// module path via `current_exe()` for the rest of this process's lifetime.
+#[cfg(windows)]
+pub fn prepare_local_executable(asset_name: &str) -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("Cannot locate the running executable")?;
+    if !cleanup_old_exe(&exe) {
+        return Ok(exe);
+    }
+    match migrate_legacy_executable(&exe, asset_name) {
+        Ok(Some(target)) => Ok(target),
+        Ok(None) => Ok(exe),
+        Err(error) => {
+            log_warn!(
+                "暂时无法将 {} 改名为 {}；本次仍可继续使用。完整错误详情: {}",
+                "Could not rename {} to {}. You can continue using this copy. Full error details: {}",
+                exe.display(),
+                asset_name,
+                error
+            );
+            Ok(exe)
+        },
+    }
+}
+
+#[cfg(windows)]
+fn migrate_legacy_executable(exe: &Path, asset_name: &str) -> std::io::Result<Option<PathBuf>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let legacy_name = match asset_name {
+        ASSET_SCANNER => LEGACY_ASSET_SCANNER,
+        ASSET_CAPTURE => LEGACY_ASSET_CAPTURE,
+        _ => return Ok(None),
+    };
+    if !exe
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(legacy_name))
+    {
+        return Ok(None);
+    }
+
+    let target = exe.with_file_name(asset_name);
+    let source_wide: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain([0]).collect();
+    // This moves the running image in place without replacing an existing copy.
+    if unsafe { MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Some(target))
+}
+
+#[cfg(windows)]
+fn cleanup_old_exe(exe: &Path) -> bool {
+    let old = exe.with_extension("exe.old");
+    for attempt in 0..5 {
+        match std::fs::remove_file(&old) {
+            Ok(()) => {
+                log_debug!("已清理旧版本", "Cleaned up old exe");
+                return true;
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+            // Older updaters can launch the replacement before shutting down.
+            Err(_) if attempt < 4 => std::thread::sleep(Duration::from_millis(500)),
+            Err(error) => log_warn!(
+                "无法清理上次更新留下的旧程序文件；当前版本仍可继续使用。完整错误详情: {}",
+                "The old application file left by the previous update could not be removed; the current version can still be used. Full error details: {}",
+                error
+            ),
         }
     }
+    false
 }
 
 // ── Public: download & self-replace ──────────────────────────────
@@ -487,13 +531,11 @@ pub fn cleanup_old_exe() {
 /// 1. Write and flush the complete download to a staging file
 /// 2. Rename the current executable → `<current>.exe.old`
 /// 3. Rename the staging file to the current executable path
-/// 4. On next launch, `cleanup_old_exe()` removes the `.old` file
+/// 4. On next launch, `prepare_local_executable()` removes the `.old` file
 ///
 /// If writing the new file fails, the rename is rolled back so the
 /// original exe is restored.
-pub fn download_and_replace(download_url: &str) -> Result<PathBuf> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| anyhow!("无法获取当前程序路径 / Cannot get current exe path: {}", e))?;
+pub fn download_and_replace(exe_path: &Path, download_url: &str) -> Result<()> {
     let old_path = exe_path.with_extension("exe.old");
 
     let urls = download::github_sources(download_url);
@@ -505,9 +547,9 @@ pub fn download_and_replace(download_url: &str) -> Result<PathBuf> {
         );
         Ok(bytes.to_vec())
     })?;
-    replace_executable(&exe_path, &old_path, &bytes)?;
+    replace_executable(exe_path, &old_path, &bytes)?;
     log_info!("更新完成！请重启程序。", "Update complete! Please restart.");
-    Ok(exe_path)
+    Ok(())
 }
 
 fn replace_executable(exe_path: &Path, old_path: &Path, bytes: &[u8]) -> Result<()> {
@@ -957,6 +999,66 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("goodscanner-update-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess probe invoked by startup_migrates_a_running_legacy_executable"]
+    fn legacy_startup_probe() {
+        let old_path = std::env::current_exe().unwrap();
+        let exe = prepare_local_executable(ASSET_SCANNER).unwrap();
+        assert_eq!(exe, old_path.with_file_name(ASSET_SCANNER));
+        assert!(exe.is_file());
+        assert!(!old_path.exists());
+        assert!(!old_path.with_extension("exe.old").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_migrates_a_running_legacy_executable() {
+        let dir = test_dir();
+        let legacy = dir.join(LEGACY_ASSET_SCANNER);
+        std::fs::copy(std::env::current_exe().unwrap(), &legacy).unwrap();
+        std::fs::write(legacy.with_extension("exe.old"), b"backup").unwrap();
+        let output = std::process::Command::new(&legacy)
+            .args(["--exact", "updater::tests::legacy_startup_probe", "--ignored"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        std::fs::remove_file(dir.join(ASSET_SCANNER)).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_matches_the_build_edition_and_preserves_existing_executables() {
+        let dir = test_dir();
+        let legacy = dir.join("goodcapture.EXE");
+        let target = dir.join(ASSET_CAPTURE);
+        std::fs::write(&legacy, b"old capture").unwrap();
+        std::fs::write(&target, b"existing capture").unwrap();
+
+        assert_eq!(
+            migrate_legacy_executable(&legacy, ASSET_SCANNER).unwrap(),
+            None
+        );
+        assert!(migrate_legacy_executable(&legacy, ASSET_CAPTURE).is_err());
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"old capture");
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing capture");
+
+        std::fs::remove_file(&target).unwrap();
+        assert_eq!(
+            migrate_legacy_executable(&legacy, ASSET_CAPTURE).unwrap(),
+            Some(target.clone())
+        );
+        assert!(!legacy.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old capture");
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
