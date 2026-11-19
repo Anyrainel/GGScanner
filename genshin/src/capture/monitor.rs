@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use auto_artifactarium::r#gen::protos::{AvatarInfo, Item, Unk};
-use auto_artifactarium::{GameCommand, GamePacket, GameSniffer, PacketDirection};
+use auto_artifactarium::{GameCommand, GamePacket, GameSniffer, LoginLayout, PacketDirection};
 use base64::prelude::*;
 use protobuf::Message;
 use protobuf::UnknownValueRef;
@@ -56,6 +56,31 @@ pub enum CaptureCommand {
     StopCapture,
 }
 
+/// Why the most recent login response did not verify a game UID.
+///
+/// A non-zero `retcode` is an ordinary rejected login: another attempt is the
+/// fix. A response whose seed decoded but whose layout is not the reviewed one
+/// is a client-build problem worth reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginRejection {
+    /// The server answered with a non-zero `retcode`.
+    ServerRejected,
+    /// The response was readable but did not match a reviewed login layout.
+    UnreviewedLayout,
+}
+
+/// Sanitized detail of an unverified login, kept for a bug report.
+///
+/// Protocol metadata only: it never carries the game UID, an account
+/// identifier, a token, a seed or key material, so it is safe to copy out.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LoginDiagnosis {
+    pub rejection: LoginRejection,
+    /// `LoginLayout::summary`, or `unavailable` when the body was not readable.
+    pub layout: String,
+}
+
 /// State shared between the monitor and UI.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct CaptureState {
@@ -73,6 +98,10 @@ pub struct CaptureState {
     pub has_key_exchange: bool,
     /// Verified game UID for this login, available before the initial inventory.
     pub uid: Option<u32>,
+    /// Present when the most recent login response did not verify a game UID.
+    /// Keeps the rejection class apart from the sanitized layout, so the hint can
+    /// tell "log in again" from "report this client build".
+    pub login_diagnosis: Option<LoginDiagnosis>,
     pub has_characters: bool,
     pub has_items: bool,
     pub has_achievements: bool,
@@ -97,6 +126,7 @@ impl Default for CaptureState {
             complete: false,
             has_key_exchange: false,
             uid: None,
+            login_diagnosis: None,
             has_characters: false,
             has_items: false,
             has_achievements: false,
@@ -120,7 +150,11 @@ impl CaptureState {
     }
 
     pub fn diagnostics(&self) -> String {
-        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; rejectedCommands={}; unmatchedCommands={}; keyExchange={}; uidVerified={}; characters={}; weapons={}; artifacts={}; achievements={}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.rejected_commands, self.unmatched_commands, self.has_key_exchange, self.uid.is_some(), self.character_count, self.weapon_count, self.artifact_count, self.achievement_count, self.last_transport_error.as_deref().unwrap_or("none"))
+        let login_layout = self
+            .login_diagnosis
+            .as_ref()
+            .map_or("none", |diagnosis| diagnosis.layout.as_str());
+        format!("listenerReady={}; elapsed={}s; packets={}; decryptedCommands={}; rejectedCommands={}; unmatchedCommands={}; keyExchange={}; uidVerified={}; loginLayout=[{}]; characters={}; weapons={}; artifacts={}; achievements={}; lastTransportError={}", self.listener_ready, self.elapsed_secs, self.packet_count, self.command_count, self.rejected_commands, self.unmatched_commands, self.has_key_exchange, self.uid.is_some(), login_layout, self.character_count, self.weapon_count, self.artifact_count, self.achievement_count, self.last_transport_error.as_deref().unwrap_or("none"))
     }
 
     pub fn timeout_hint(&self) -> (&'static str, &'static str) {
@@ -136,7 +170,17 @@ impl CaptureState {
         } else if !self.has_key_exchange {
             ("已解码部分消息，但未捕获登录握手。请关闭游戏，在开始抓包后重新登录。", "Some messages decoded but the login handshake was not captured. Close the game and log in after starting capture.")
         } else if self.uid.is_none() {
-            ("尚未验证游戏 UID。请更新 GGScanner，并在开始抓包后重新登录；若仍失败，请复制完整错误。", "The game UID has not been verified. Update GGScanner and log in after starting capture; if this persists, copy the full error.")
+            match self.login_diagnosis.as_ref().map(|diagnosis| diagnosis.rejection) {
+                Some(LoginRejection::ServerRejected) => (
+                    "游戏服务器拒绝了本次登录，因此未能验证游戏 UID。请在开始抓包后重新登录；若仍失败，请复制完整错误（含 loginLayout）。",
+                    "The game server rejected this login, so the game UID could not be verified. Log in again after starting capture; if this persists, copy the full error (including loginLayout).",
+                ),
+                Some(LoginRejection::UnreviewedLayout) => (
+                    "登录响应的布局未匹配到已支持的版本，因此未能验证游戏 UID。请复制完整错误（含 loginLayout）反馈该客户端版本。",
+                    "The login response did not match a supported layout, so the game UID could not be verified. Copy the full error (including loginLayout) to report this client build.",
+                ),
+                None => ("尚未验证游戏 UID。请更新 GGScanner，并在开始抓包后重新登录；若仍失败，请复制完整错误。", "The game UID has not been verified. Update GGScanner and log in after starting capture; if this persists, copy the full error."),
+            }
         } else {
             ("已解码游戏消息，但尚未收到全部所选数据。需要成就时请打开成就界面；若仍失败，请复制完整错误。", "Game messages decoded but selected data is incomplete. Open Achievements if selected; if this persists, copy the full error.")
         }
@@ -438,16 +482,48 @@ impl CaptureMonitor {
                 // same UID. Never attach old inventory to a new identity.
                 self.reset_login();
                 self.player_data.set_uid(command.account_uid);
-                self.state.lock().expect("capture state poisoned").uid = command.account_uid;
-                if command.account_uid.is_none() {
+                let diagnosis = command.account_uid.is_none().then(|| LoginDiagnosis {
+                    rejection: if command
+                        .login_layout
+                        .as_ref()
+                        .and_then(|layout| layout.retcode)
+                        .is_some_and(|retcode| retcode != 0)
+                    {
+                        LoginRejection::ServerRejected
+                    } else {
+                        LoginRejection::UnreviewedLayout
+                    },
+                    layout: command
+                        .login_layout
+                        .as_ref()
+                        .map_or_else(|| "unavailable".to_owned(), LoginLayout::summary),
+                });
+                {
+                    let mut state = self.state.lock().expect("capture state poisoned");
+                    state.uid = command.account_uid;
+                    state.login_diagnosis.clone_from(&diagnosis);
+                }
+                if let Some(diagnosis) = diagnosis {
                     log_warn!(
-                        "登录响应中的游戏 UID 无法验证，请更新扫描器后重新登录。",
-                        "The login response's game UID could not be verified. Update the scanner and log in again."
+                        "登录响应中的游戏 UID 无法验证，登录布局：{}",
+                        "The login response's game UID could not be verified; login layout: {}",
+                        diagnosis.layout
                     );
-                    let error = "The Genshin login UID could not be verified. Update GGScanner and log in again.";
-                    self.state.lock().expect("capture state poisoned").error = Some(error.into());
+                    // The layout is protocol metadata, not account data, so it is
+                    // safe to surface next to the failure for a bug report.
+                    let error = match diagnosis.rejection {
+                        LoginRejection::ServerRejected => format!(
+                            "The Genshin login was rejected by the server; log in again. Login layout: {}",
+                            diagnosis.layout
+                        ),
+                        LoginRejection::UnreviewedLayout => format!(
+                            "The Genshin login UID could not be verified. Update GGScanner and log in again. Login layout: {}",
+                            diagnosis.layout
+                        ),
+                    };
+                    self.state.lock().expect("capture state poisoned").error = Some(error.clone());
                     if let Some(latest) = &self.continuous {
-                        latest.fail(error.into());
+                        latest.fail(error);
                     }
                 }
                 continue;
@@ -1107,6 +1183,13 @@ fn load_keys() -> Result<HashMap<u16, Vec<u8>>> {
 mod tests {
     use super::*;
 
+    fn unreviewed_layout() -> LoginDiagnosis {
+        LoginDiagnosis {
+            rejection: LoginRejection::UnreviewedLayout,
+            layout: "retcode=0;keyId=9;gameUid=present;seedFields=477;accepted=false".into(),
+        }
+    }
+
     #[test]
     fn diagnostics_distinguish_listener_traffic_decryption_and_missing_data() {
         let mut state = CaptureState::default();
@@ -1119,6 +1202,12 @@ mod tests {
         assert!(state.timeout_hint().1.contains("login handshake"));
         state.has_key_exchange = true;
         assert!(state.timeout_hint().1.contains("UID has not been verified"));
+        state.login_diagnosis = Some(unreviewed_layout());
+        assert!(state
+            .timeout_hint()
+            .1
+            .contains("did not match a supported layout"));
+        state.login_diagnosis = None;
         state.uid = Some(800_000_001);
         assert!(state
             .timeout_hint()
@@ -1127,6 +1216,45 @@ mod tests {
         assert!(state
             .diagnostics()
             .contains("packets=8; decryptedCommands=3"));
+        assert!(state.diagnostics().contains("loginLayout=[none]"));
+    }
+
+    #[test]
+    fn diagnostics_report_an_unrecognized_login_layout_without_identity() {
+        let state = CaptureState {
+            listener_ready: true,
+            packet_count: 4,
+            command_count: 2,
+            has_key_exchange: true,
+            login_diagnosis: Some(unreviewed_layout()),
+            ..CaptureState::default()
+        };
+        let diagnostics = state.diagnostics();
+        assert!(diagnostics.contains("uidVerified=false"));
+        assert!(diagnostics.contains(
+            "loginLayout=[retcode=0;keyId=9;gameUid=present;seedFields=477;accepted=false]"
+        ));
+    }
+
+    #[test]
+    fn a_rejected_login_asks_for_another_attempt_instead_of_a_bug_report() {
+        let state = CaptureState {
+            listener_ready: true,
+            packet_count: 4,
+            command_count: 2,
+            has_key_exchange: true,
+            login_diagnosis: Some(LoginDiagnosis {
+                rejection: LoginRejection::ServerRejected,
+                layout: "retcode=2007;keyId=none;gameUid=absent;seedFields=none;accepted=false"
+                    .into(),
+            }),
+            ..CaptureState::default()
+        };
+        let (zh, en) = state.timeout_hint();
+        assert!(zh.contains("服务器拒绝"), "{zh}");
+        assert!(en.contains("server rejected this login"), "{en}");
+        assert!(!en.contains("client build"), "{en}");
+        assert!(state.diagnostics().contains("loginLayout=[retcode=2007;"));
     }
 
     #[test]
