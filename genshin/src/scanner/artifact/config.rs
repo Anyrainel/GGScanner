@@ -7,6 +7,8 @@ use crate::scanner::common::ocr_pool::{DEFAULT_ARTIFACT_LEVEL_OCR, DEFAULT_ARTIF
 #[derive(Clone, Debug)]
 pub struct GoodArtifactScannerConfig {
     pub min_rarity: i32,
+    /// Manager actions skip lower-rarity variants of a set. Inventory exports keep them.
+    pub require_max_set_rarity: bool,
     pub verbose: bool,
     /// OCR backend for artifact level
     pub ocr_backend: String,
@@ -34,6 +36,7 @@ impl Default for GoodArtifactScannerConfig {
     fn default() -> Self {
         Self {
             min_rarity: 4,
+            require_max_set_rarity: false,
             verbose: false,
             ocr_backend: DEFAULT_ARTIFACT_LEVEL_OCR.to_string(),
             substat_ocr_backend: DEFAULT_ARTIFACT_OCR.to_string(),

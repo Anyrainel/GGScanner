@@ -1468,6 +1468,7 @@ impl GoodScannerApplication {
         let backends = config.ocr.backends().artifact;
         GoodArtifactScannerConfig {
             min_rarity: config.artifact_min_rarity,
+            require_max_set_rarity: false,
             verbose: config.verbose,
             ocr_backend: backends.v5,
             substat_ocr_backend: backends.v4,

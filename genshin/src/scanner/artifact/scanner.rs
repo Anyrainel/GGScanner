@@ -1393,10 +1393,6 @@ impl GoodArtifactScanner {
             },
         };
 
-        // Reject lower-rarity versions of higher-rarity sets, and all 3-star
-        // artifacts globally. In Genshin, 5-star sets have 4-star variants and
-        // 4-star sets have 3-star variants — the mappings file stores each
-        // set's canonical (max) rarity.
         if rarity == 3 {
             log_debug!(
                 "[artifact] idx={} 忽略3星圣遗物",
@@ -1407,7 +1403,7 @@ impl GoodArtifactScanner {
             return Ok(ArtifactScanResult::Skip);
         }
         if let Some(&set_max_rarity) = mappings.artifact_set_max_rarity.get(&set_key) {
-            if rarity < set_max_rarity {
+            if config.require_max_set_rarity && rarity < set_max_rarity {
                 log_debug!(
                     "[artifact] idx={} 忽略{}星 {} 变体（套装最高{}星）",
                     "[artifact] idx={} ignoring {}* {} variant (set max {}*)",
@@ -1561,6 +1557,7 @@ impl GoodArtifactScanner {
             dump_images: false,
             verbose: false,
             min_rarity: 1, // don't stop on low rarity, just return None
+            require_max_set_rarity: true,
             ..Default::default()
         };
 
@@ -1938,10 +1935,6 @@ impl GoodArtifactScanner {
                 serde_json::to_string(&index_map).unwrap_or_default(),
             );
         }
-
-        // Note: previously filtered unleveled 4-star artifacts from 5-star-capable sets,
-        // but this removed valid data (e.g., AubadeOfMorningstarAndMoon, ADayCarvedFromRisingWinds).
-        // All scanned artifacts are now kept regardless.
 
         let elapsed = now.elapsed().unwrap_or_default().as_secs_f64();
         if ctrl.cancel_token().is_cancelled() {
@@ -2376,6 +2369,56 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, ArtifactScanResult::Skip));
+    }
+
+    #[test]
+    fn inventory_keeps_four_star_set_variant_while_manager_skips_it() {
+        let mut image = make_1080p_image();
+        paint_rarity_stars(&mut image, 4);
+        let frame = CaptureFrame::full(image);
+        let scaler = make_1080p_scaler();
+        let mappings = make_test_mappings();
+        let engines = || {
+            let level = FakeOcr::new(vec!["+0"]);
+            let details = FakeOcr::new(vec![
+                "死之羽",
+                "攻击力",
+                "+0",
+                "生命值+191",
+                "元素充能效率+5.2%",
+                "防御力+5.3%",
+                "角斗士的终幕礼",
+                "",
+            ]);
+            (level, details)
+        };
+        let (level, details) = engines();
+        let inventory = GoodArtifactScanner::scan_single_artifact(
+            &level,
+            &details,
+            &frame,
+            &scaler,
+            &ArtifactOcrRegions::new(),
+            &mappings,
+            &default_config(),
+            0,
+            None,
+        )
+        .unwrap();
+        let ArtifactScanResult::Artifact(artifact) = inventory else {
+            panic!("the four-star Gladiator plume was missing from the inventory");
+        };
+        assert_eq!(artifact.rarity, 4);
+        assert_eq!(artifact.set_key, "GladiatorsFinale");
+        assert_eq!(artifact.slot_key, "plume");
+        assert_eq!(artifact.substats.len(), 3);
+
+        let (level, details) = engines();
+        let manager = GoodArtifactScanner::identify_panel_item_at(
+            &level, &details, &frame, &scaler, &mappings, 0, None,
+        )
+        .unwrap();
+        assert!(matches!(manager, ArtifactScanResult::Skip));
     }
 
     #[test]
