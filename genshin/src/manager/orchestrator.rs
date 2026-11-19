@@ -123,13 +123,6 @@ impl ArtifactManager {
 
         let stop_on_all_matched = self.stop_on_all_matched || self.filter_involved_sets;
 
-        // In fast mode, compute the highest target level for page-skip optimization.
-        let max_target_level = if stop_on_all_matched {
-            targets.iter().map(|t| t.artifact.level).max().unwrap_or(0)
-        } else {
-            -1 // disabled
-        };
-
         let lock_mgr = LockManager::new(self.mappings.clone(), self.pools.clone());
         let (lock_results, scanned_artifacts, matched_indices, scan_complete, ocr_failures) =
             lock_mgr.execute(
@@ -141,7 +134,6 @@ impl ArtifactManager {
                 self.initial_wait,
                 stop_on_all_matched,
                 self.filter_involved_sets,
-                max_target_level,
                 self.dump_images,
                 progress_fn,
             );

@@ -740,7 +740,7 @@ fn run_reprocess(images_dir: &str, output_path: Option<&str>) -> Result<()> {
             Ok(ArtifactScanResult::Stop) => {
                 eprintln!("[{:04}] low rarity, skipped", idx);
             },
-            Ok(ArtifactScanResult::Skip) => {
+            Ok(ArtifactScanResult::Skip | ArtifactScanResult::EnhancementMaterial) => {
                 eprintln!("[{:04}] skipped", idx);
             },
             Err(e) => {

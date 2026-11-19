@@ -21,7 +21,7 @@ use crate::scanner::common::equip_parser;
 use crate::scanner::common::fuzzy_match::fuzzy_match_map;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode};
-use crate::scanner::common::grid_voter::{GridVoteSchedule, PagedGridVoter, ReadyItem};
+use crate::scanner::common::grid_voter::{PagedGridVoter, ReadyItem};
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::{DebugOcrField, DebugScanResult, GoodArtifact, GoodSubStat};
 use crate::scanner::common::ocr_factory::{self, same_model};
@@ -34,6 +34,7 @@ use crate::scanner::common::stat_parser;
 lazy_static::lazy_static! {
     /// Regex for parsing level text like "+20", "+ 12", "0"
     static ref LEVEL_REGEX: Regex = Regex::new(r"\+?\s*(\d+)").unwrap();
+    static ref EXACT_LEVEL_REGEX: Regex = Regex::new(r"^\s*[+＋]?\s*(0|[1-9][0-9]?)\s*$").unwrap();
 }
 
 /// Crop fraction for number-only OCR retry: percent stats need more left trimming
@@ -44,6 +45,10 @@ fn crop_frac_for_stat(is_percent: bool) -> f64 {
     } else {
         0.25
     }
+}
+
+fn parse_confirmed_level(text: &str) -> Option<i32> {
+    EXACT_LEVEL_REGEX.captures(text)?[1].parse::<i32>().ok().filter(|&level| level <= 20)
 }
 
 /// Count Chinese characters (CJK Unified Ideographs) in a string.
@@ -145,6 +150,7 @@ impl ArtifactOcrRegions {
 /// Result of scanning a single artifact
 pub enum ArtifactScanResult {
     Artifact(GoodArtifact),
+    EnhancementMaterial,
     Stop,
     Skip,
 }
@@ -549,6 +555,10 @@ impl GoodArtifactScanner {
         // 1. Part name → slot key
         let part_text = Self::ocr_image_region(substat_ocr, image, ocr_regions.part_name, scaler)?;
         annotator::record_ocr("slot", ocr_regions.part_name, &part_text);
+        if part_text.trim() == "圣遗物强化素材" {
+            annotator::finalize_skip("artifact enhancement material");
+            return Ok(ArtifactScanResult::EnhancementMaterial);
+        }
         let slot_key = stat_parser::match_slot_key(&part_text);
 
         let slot_key = match slot_key {
@@ -703,8 +713,8 @@ impl GoodArtifactScanner {
             // Legacy: panel pixel-based detection (requires animation delay)
             // detect_artifact_lock/astral_mark annotate internally
             (
-                pixel_utils::detect_artifact_lock(&image.image, scaler, y_shift),
-                pixel_utils::detect_artifact_astral_mark(&image.image, scaler, y_shift),
+                pixel_utils::detect_artifact_lock(image, scaler, y_shift),
+                pixel_utils::detect_artifact_astral_mark(image, scaler, y_shift),
             )
         };
         // All astraled artifacts are locked in-game. If we still see
@@ -1483,27 +1493,22 @@ impl GoodArtifactScanner {
     /// unrecognizable artifacts instead of stopping/erroring.
     ///
     /// Quick level-only OCR for page-skip optimization.
-    /// Returns the artifact level (0-20), or -1 if OCR fails.
+    /// Returns a complete, valid level label; ambiguous OCR cannot skip a page.
     ///
     /// 快速等级OCR，用于页面跳过优化。
     pub fn scan_level_only(
         ocr: &dyn ImageToText<RgbImage>,
         image: &CaptureFrame,
         scaler: &CoordScaler,
-    ) -> i32 {
+    ) -> Option<i32> {
         let regions = ArtifactOcrRegions::new();
         let y_shift = if Self::detect_elixir_crafted(image, scaler) {
             ELIXIR_SHIFT
         } else {
             0.0
         };
-        let text = Self::ocr_image_region_shifted(ocr, image, regions.level, y_shift, scaler)
-            .unwrap_or_default();
-        LEVEL_REGEX
-            .captures(&text)
-            .and_then(|c| c[1].parse::<i32>().ok())
-            .filter(|&v| v <= 20)
-            .unwrap_or(-1)
+        let text = Self::ocr_image_region_shifted(ocr, image, regions.level, y_shift, scaler).ok()?;
+        parse_confirmed_level(&text)
     }
 
     /// 从游戏截图中识别单个圣遗物（同步调用）。
@@ -1533,6 +1538,23 @@ impl GoodArtifactScanner {
         item_index: usize,
         grid_icons: Option<GridIconResult>,
     ) -> Result<Option<GoodArtifact>> {
+        match Self::identify_panel_item_at(ocr, substat_ocr, image, scaler, mappings, item_index, grid_icons)? {
+            ArtifactScanResult::Artifact(artifact) => Ok(Some(artifact)),
+            ArtifactScanResult::EnhancementMaterial | ArtifactScanResult::Stop | ArtifactScanResult::Skip => Ok(None),
+        }
+    }
+
+    /// Preserve recognized non-artifact items so a Manager traversal can
+    /// distinguish them from unreadable artifact identities.
+    pub(crate) fn identify_panel_item_at(
+        ocr: &dyn ImageToText<RgbImage>,
+        substat_ocr: &dyn ImageToText<RgbImage>,
+        image: &CaptureFrame,
+        scaler: &CoordScaler,
+        mappings: &MappingManager,
+        item_index: usize,
+        grid_icons: Option<GridIconResult>,
+    ) -> Result<ArtifactScanResult> {
         let regions = ArtifactOcrRegions::new();
         let config = GoodArtifactScannerConfig {
             continue_on_failure: true,
@@ -1542,7 +1564,7 @@ impl GoodArtifactScanner {
             ..Default::default()
         };
 
-        match Self::scan_single_artifact(
+        Self::scan_single_artifact(
             ocr,
             substat_ocr,
             image,
@@ -1552,11 +1574,7 @@ impl GoodArtifactScanner {
             &config,
             item_index,
             grid_icons,
-        ) {
-            Ok(ArtifactScanResult::Artifact(a)) => Ok(Some(a)),
-            Ok(ArtifactScanResult::Stop) | Ok(ArtifactScanResult::Skip) => Ok(None),
-            Err(e) => Err(e),
-        }
+        )
     }
 
     /// Public wrapper for `find_set_key_in_text` — used by the artifact manager
@@ -1755,7 +1773,7 @@ impl GoodArtifactScanner {
                             }
                         },
                         Ok(ArtifactScanResult::Stop) => Ok(None),
-                        Ok(ArtifactScanResult::Skip) => Ok(None),
+                        Ok(ArtifactScanResult::Skip | ArtifactScanResult::EnhancementMaterial) => Ok(None),
                         Err(e) => {
                             annotator::finalize_error(None, &e.to_string());
                             Err(e)
@@ -1773,10 +1791,7 @@ impl GoodArtifactScanner {
                 stop_on_failure: !self.config.continue_on_failure,
             },
             extra_delay: self.config.extra_delay,
-            detail_panel_rect: Some(ARTIFACT_DETAIL_PANEL_RECT),
-            grid_vote_schedule: GridVoteSchedule::for_page,
-            probe_last_cell_per_page: false,
-            detect_grid_duplicates: false,
+            probe_leading_pages: false,
             detect_empty_cells: filtered_scan,
             min_items_before_visual_end: 0,
         };
@@ -1823,21 +1838,25 @@ impl GoodArtifactScanner {
 
         let scan_outcome = bp.scan_grid(total, &scan_config, start_at, |ctrl, event| {
             match event {
-                GridEvent::PageStarted { .. } => ScanAction::Continue,
                 GridEvent::PageCompleted { .. } => {
+                    voter.finish_additional_passes(&scaler, || ctrl.capture_artifact_grid().ok());
+                    if emit_ready(voter.final_flush(), &item_tx).is_err() {
+                        return ScanAction::Stop;
+                    }
                     if worker_handle.stop_requested() {
                         ScanAction::Stop
                     } else {
                         ScanAction::Continue
                     }
                 },
+                GridEvent::PageTail { .. } => ScanAction::Continue,
                 GridEvent::PageScrolled => {
                     visible_layout = None;
                     voter.reset_page();
                     ScanAction::Continue
                 },
                 GridEvent::Item {
-                    idx, frame, layout, ..
+                    idx, frame, layout, grid_image, ..
                 } => {
                     visible_layout = Some(layout);
                     // Check if worker has signaled stop (e.g., too many errors)
@@ -1855,7 +1874,7 @@ impl GoodArtifactScanner {
                         &scaler,
                         self.config.min_rarity,
                     ) {
-                        voter.finish_additional_passes(&scaler, || ctrl.capture_game().ok());
+                        voter.finish_additional_passes(&scaler, || ctrl.capture_artifact_grid().ok());
                         let ready = voter.early_stop_flush();
                         let _ = emit_ready(ready, &item_tx);
                         return ScanAction::Stop;
@@ -1869,6 +1888,7 @@ impl GoodArtifactScanner {
                         layout.page_start_idx,
                         layout.page_items,
                         layout.screen_start_row,
+                        grid_image.as_ref(),
                     );
                     if emit_ready(ready, &item_tx).is_err() {
                         return ScanAction::Stop;
@@ -1879,7 +1899,7 @@ impl GoodArtifactScanner {
             }
         });
 
-        voter.finish_additional_passes(&scaler, || ctrl.capture_game().ok());
+        voter.finish_additional_passes(&scaler, || ctrl.capture_artifact_grid().ok());
         let leftover = voter.final_flush();
         let _ = emit_ready(leftover, &item_tx);
 
@@ -2167,8 +2187,8 @@ impl GoodArtifactScanner {
 
         // Lock + astral mark (pixel)
         let t = Instant::now();
-        let lock = pixel_utils::detect_artifact_lock(&image.image, scaler, y_shift);
-        let astral_mark = pixel_utils::detect_artifact_astral_mark(&image.image, scaler, y_shift);
+        let lock = pixel_utils::detect_artifact_lock(image, scaler, y_shift);
+        let astral_mark = pixel_utils::detect_artifact_astral_mark(image, scaler, y_shift);
         fields.push(DebugOcrField {
             field_name: "pixel_detect".into(),
             raw_text: String::new(),
@@ -2206,12 +2226,40 @@ mod tests {
     use super::*;
     use crate::scanner::common::test_utils::*;
 
+    #[test]
+    fn page_probe_requires_a_complete_valid_level_label() {
+        for (label, level) in [("+20", 20), ("＋16", 16), ("  + 4 ", 4), ("0", 0)] {
+            assert_eq!(parse_confirmed_level(label), Some(level));
+        }
+        for label in ["", "+", "-1", "+21", "+12/20", "+20x", "x16", "+05"] {
+            assert_eq!(parse_confirmed_level(label), None);
+        }
+    }
+
     fn default_config() -> GoodArtifactScannerConfig {
         GoodArtifactScannerConfig {
             verbose: false,
             dump_images: false,
             continue_on_failure: false,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn manager_recognizes_only_the_complete_enhancement_material_label() {
+        let mut image = make_1080p_image();
+        paint_rarity_stars(&mut image, 4);
+        let frame = CaptureFrame::full(image);
+        let mappings = make_test_mappings();
+        for (label, material) in [("圣遗物强化素材", true), ("圣遗物强化", false), ("", false)] {
+            let level_ocr = FakeOcr::new(vec![]);
+            let slot_ocr = FakeOcr::new(vec![label]);
+            let result = GoodArtifactScanner::identify_panel_item_at(
+                &level_ocr, &slot_ocr, &frame, &make_1080p_scaler(), &mappings, 0, None,
+            ).unwrap();
+            assert_eq!(matches!(result, ArtifactScanResult::EnhancementMaterial), material);
+            assert_eq!(slot_ocr.call_count(), 1);
+            assert_eq!(level_ocr.call_count(), 0);
         }
     }
 

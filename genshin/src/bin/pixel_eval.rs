@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use genshin_scanner::scanner::common::capture_frame::CaptureFrame;
 use genshin_scanner::scanner::common::constants::{
     ARTIFACT_ASTRAL_POS1, ARTIFACT_ASTRAL_POS2, ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2,
     CONSTELLATION_NODES, CONSTELLATION_RING_INNER, CONSTELLATION_RING_OUTER,
@@ -296,8 +297,6 @@ fn panel_eval(root: &Path, labels: &Export) -> Result<()> {
                 pixel_rgb(&image, &scaler, 1462.0, 430.0),
                 pixel_rgb(&image, &scaler, 1490.0, 432.0),
             ];
-            let lock_prod = pixel_utils::detect_artifact_lock(&image, &scaler, y_shift);
-            let astral_prod = pixel_utils::detect_artifact_astral_mark(&image, &scaler, y_shift);
             let lock_brightness = [
                 pixel_rgb(
                     &image,
@@ -330,6 +329,9 @@ fn panel_eval(root: &Path, labels: &Export) -> Result<()> {
                 )
                 .brightness(),
             ];
+            let frame = CaptureFrame::full(image);
+            let lock_prod = pixel_utils::detect_artifact_lock(&frame, &scaler, y_shift);
+            let astral_prod = pixel_utils::detect_artifact_astral_mark(&frame, &scaler, y_shift);
             Some(Row {
                 elixir: artifact.elixir_crafted,
                 lock: artifact.lock,

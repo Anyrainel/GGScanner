@@ -19,7 +19,7 @@
 //! - Short pages defer all items until their three scheduled passes complete,
 //!   so a recent-artifact scan ending mid-page gives every returned item a
 //!   majority-voted lock state.
-//! - Early-stop callers finish any remaining full-screen passes before
+//! - Early-stop callers finish any remaining grid passes before
 //!   flushing deferred items.
 //!
 //! ## Payload
@@ -42,7 +42,7 @@ use super::grid_icon_detector::{
 /// Grid annotation snapshot: cell bounding boxes + per-cell (index, lock, astral).
 pub type GridAnnotation = Arc<(Vec<GridCellAnnotation>, Vec<(usize, bool, bool)>)>;
 
-/// Full-screen grid-vote positions for one visible page.
+/// Grid-vote positions for one visible page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridVoteSchedule {
     pub indices: [usize; 3],
@@ -78,11 +78,22 @@ struct PageState<T> {
     page_items: usize,
     screen_start_row: usize,
     detection: GridPageDetection,
+    include_grid_overlay: bool,
     schedule: GridVoteSchedule,
     passes_done: u32,
     defer_until_complete: bool,
     last_idx: usize,
     deferred: Vec<(usize, CaptureFrame, T)>,
+}
+
+impl<T> PageState<T> {
+    fn grid_overlay(&self) -> Option<GridAnnotation> {
+        if self.include_grid_overlay {
+            self.detection.annotation_snapshot().map(Arc::new)
+        } else {
+            None
+        }
+    }
 }
 
 /// State machine that ingests items page-by-page and returns them in voting
@@ -120,7 +131,7 @@ impl<T> PagedGridVoter<T> {
         self.state.as_ref().map(|s| s.last_idx)
     }
 
-    /// Run one additional grid detection pass using a full-window capture.
+    /// Run one additional grid detection pass while the page is still visible.
     pub fn run_additional_pass(
         &mut self,
         tiebreak_image: &RgbImage,
@@ -163,7 +174,7 @@ impl<T> PagedGridVoter<T> {
     ) -> Vec<ReadyItem<T>> {
         let page_start = (idx / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
         let page_items = (self.total - page_start).min(ITEMS_PER_PAGE);
-        self.record_with_layout(idx, frame, payload, scaler, page_start, page_items, 0)
+        self.record_with_layout(idx, frame, payload, scaler, page_start, page_items, 0, None)
     }
 
     /// Record an item using traversal-provided page geometry.
@@ -180,6 +191,7 @@ impl<T> PagedGridVoter<T> {
         page_start: usize,
         page_items: usize,
         screen_start_row: usize,
+        grid_image: Option<&RgbImage>,
     ) -> Vec<ReadyItem<T>> {
         debug_assert!(idx >= page_start && idx < page_start + page_items);
         debug_assert!(screen_start_row < 5);
@@ -197,6 +209,7 @@ impl<T> PagedGridVoter<T> {
                     screen_start_row,
                     self.mode,
                 ),
+                include_grid_overlay: frame.is_full_window(),
                 schedule: GridVoteSchedule::for_page(page_items),
                 passes_done: 0,
                 defer_until_complete: page_items < ITEMS_PER_PAGE,
@@ -213,9 +226,15 @@ impl<T> PagedGridVoter<T> {
         let mut ready: Vec<ReadyItem<T>> = Vec::new();
 
         // Run detection pass at scheduled page-relative indices.
-        if state.passes_done < 3 && page_rel == state.schedule.indices[state.passes_done as usize] {
-            state.detection.detect_pass(&frame.image, scaler, idx);
-            state.passes_done += 1;
+        if state.passes_done < 3 && state.schedule.indices.contains(&page_rel) {
+            // Weapon frames include the grid. Artifact details have a nonzero
+            // origin and use a separate grid crop only at vote positions.
+            if let Some(image) =
+                grid_image.or_else(|| frame.is_full_window().then_some(&frame.image))
+            {
+                state.detection.detect_pass(image, scaler, idx);
+                state.passes_done += 1;
+            }
         }
 
         let voting_complete = state.passes_done >= 3;
@@ -229,7 +248,7 @@ impl<T> PagedGridVoter<T> {
             state.deferred.push((idx, frame, payload));
         } else {
             if voting_complete && !state.deferred.is_empty() {
-                let ann = state.detection.annotation_snapshot().map(Arc::new);
+                let ann = state.grid_overlay();
                 for (d_idx, d_frame, d_payload) in state.deferred.drain(..) {
                     let gi = state.detection.get(d_idx);
                     ready.push(ReadyItem {
@@ -242,7 +261,7 @@ impl<T> PagedGridVoter<T> {
                 }
             }
             let gi = state.detection.get(idx);
-            let ann = state.detection.annotation_snapshot().map(Arc::new);
+            let ann = state.grid_overlay();
             ready.push(ReadyItem {
                 idx,
                 frame,
@@ -260,13 +279,13 @@ impl<T> PagedGridVoter<T> {
     /// will NOT emit itself (e.g. a rarity cutoff trigger).
     ///
     /// Call [`Self::finish_additional_passes`] first when traversal stopped
-    /// before all scheduled full-screen passes were reached.
+    /// before all scheduled grid passes were reached.
     pub fn early_stop_flush(&mut self) -> Vec<ReadyItem<T>> {
         let state = match self.state.as_mut() {
             Some(s) => s,
             None => return Vec::new(),
         };
-        let ann = state.detection.annotation_snapshot().map(Arc::new);
+        let ann = state.grid_overlay();
         let mut ready = Vec::with_capacity(state.deferred.len());
         for (d_idx, d_frame, d_payload) in state.deferred.drain(..) {
             let gi = state.detection.get(d_idx);
@@ -282,13 +301,13 @@ impl<T> PagedGridVoter<T> {
     }
 
     /// Final flush at end-of-scan after callers have finished any additional
-    /// full-window passes.
+    /// grid passes.
     pub fn final_flush(&mut self) -> Vec<ReadyItem<T>> {
         let state = match self.state.as_mut() {
             Some(s) => s,
             None => return Vec::new(),
         };
-        let ann = state.detection.annotation_snapshot().map(Arc::new);
+        let ann = state.grid_overlay();
         let mut ready = Vec::with_capacity(state.deferred.len());
         for (d_idx, d_frame, d_payload) in state.deferred.drain(..) {
             let gi = state.detection.get(d_idx);
@@ -332,13 +351,29 @@ mod tests {
     }
 
     #[test]
+    fn cropped_detail_needs_separate_grid_evidence_and_has_no_grid_overlay() {
+        let scaler = CoordScaler::new(1920, 1080);
+        let detail = || CaptureFrame {
+            image: RgbImage::new(20, 20),
+            origin: (1310.0, 110.0),
+        };
+        let mut voter = PagedGridVoter::new(40, GridMode::Artifact);
+        let first = voter.record_with_layout(0, detail(), (), &scaler, 0, 40, 0, None);
+        assert!(first[0].metadata.is_none());
+        let grid = RgbImage::new(1310, 1080);
+        let next = voter.record_with_layout(13, detail(), (), &scaler, 0, 40, 0, Some(&grid));
+        assert!(next[0].metadata.is_some());
+        assert!(next[0].grid_annotation.is_none());
+    }
+
+    #[test]
     fn authoritative_short_tail_layout_drives_voting() {
         let scaler = CoordScaler::new(1920, 1080);
         let frame = || CaptureFrame::full(RgbImage::new(1920, 1080));
         let mut voter = PagedGridVoter::new(10_000, GridMode::Artifact);
 
         assert!(voter
-            .record_with_layout(40, frame(), (), &scaler, 40, 16, 3)
+            .record_with_layout(40, frame(), (), &scaler, 40, 16, 3, None)
             .is_empty());
         {
             let state = voter.state.as_ref().unwrap();
@@ -350,9 +385,9 @@ mod tests {
         }
 
         assert!(voter
-            .record_with_layout(45, frame(), (), &scaler, 40, 16, 3)
+            .record_with_layout(45, frame(), (), &scaler, 40, 16, 3, None)
             .is_empty());
-        let ready = voter.record_with_layout(50, frame(), (), &scaler, 40, 16, 3);
+        let ready = voter.record_with_layout(50, frame(), (), &scaler, 40, 16, 3, None);
         assert_eq!(
             ready.iter().map(|item| item.idx).collect::<Vec<_>>(),
             [40, 45, 50]

@@ -144,23 +144,13 @@ Other fields (`location`, `lock`, `astralMark`, `totalRolls`, and substat `initi
 #### Execution
 
 1. Open backpack → artifact tab; dismiss the in-game 5★ acquired-time filter (same as a full artifact scan).
-2. Optionally apply an in-game **set filter** when the server's "filter involved sets" option is enabled (GUI only — not an HTTP parameter). This limits the visible inventory to the sets present in the request.
-3. Walk the artifact grid, OCR each item, match targets, then **re-click matched cells and toggle lock** at page boundaries (before scrolling).
-4. Stop when all targets are matched (fast mode), when rarity drops below 4★, on user abort, or after visiting every item (full mode).
+2. The desktop Manager applies an in-game set filter for the sets present in the request.
+3. In fast mode, skip consecutive leading pages while the last cell contains a confirmed 5★ artifact above every requested level. From the first page that needs scanning, walk cells in order. Use each item's right-hand detail for OCR.
+4. Before scrolling, reopen matched cells, verify their identity, change the lock as needed, and verify the new state. The desktop Manager stops when all targets are matched, when a confirmed low-rarity boundary is reached, at the end of the inventory, or on cancellation.
 
 Lock toggles use the scanned piece's `elixirCrafted` to apply a 40px Y-shift when clicking the lock icon (elixir banner shifts the panel).
 
-#### Server-side performance options (GUI)
-
-These are configured in the GGScanner **Manager** tab, not in the HTTP request. They affect lock/unlock behavior:
-
-| GUI option | Effect |
-|------------|--------|
-| **Update inventory after scan** ON (default) | Full backpack scan; produces an artifact snapshot when the scan completes cleanly. |
-| **Update inventory after scan** OFF | Fast mode: stop once all targets are matched; may skip whole pages via level probe (assumes inventory sorted by level descending). Does **not** produce a snapshot. |
-| **Filter involved artifact sets** ON | Applies in-game set filter before scanning; implies fast mode (same as update inventory OFF). |
-
-Clients should send manage requests built from data that reflects the same inventory view the server will scan (full bag vs filtered sets). Stale JSON or duplicate stat lines are a common source of wrong-piece toggles.
+An inventory refresh is a separate scan. Clients should send lock and unlock requests built from the current inventory.
 
 #### Result IDs
 

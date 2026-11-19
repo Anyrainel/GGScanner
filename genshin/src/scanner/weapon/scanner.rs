@@ -17,7 +17,7 @@ use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::equip_parser;
 use crate::scanner::common::fuzzy_match::{fuzzy_match_map, fuzzy_match_map_pair};
 use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode};
-use crate::scanner::common::grid_voter::{GridVoteSchedule, PagedGridVoter, ReadyItem};
+use crate::scanner::common::grid_voter::{PagedGridVoter, ReadyItem};
 
 lazy_static::lazy_static! {
     static ref SLASH_RE: Regex = Regex::new(r"(\d+)\s*/\s*(\d+)").unwrap();
@@ -653,10 +653,7 @@ impl GoodWeaponScanner {
                 delay_ms: self.config.panel_delay,
             },
             extra_delay: 0,
-            detail_panel_rect: None,
-            grid_vote_schedule: GridVoteSchedule::for_page,
-            probe_last_cell_per_page: false,
-            detect_grid_duplicates: true,
+            probe_leading_pages: false,
             detect_empty_cells: false,
             min_items_before_visual_end: 0,
         };
@@ -691,7 +688,6 @@ impl GoodWeaponScanner {
         };
 
         bp.scan_grid(total, &scan_config, start_at, |ctrl, event| match event {
-            GridEvent::PageStarted { .. } => ScanAction::Continue,
             GridEvent::PageCompleted { .. } => {
                 if worker_handle.stop_requested() {
                     ScanAction::Stop
@@ -699,6 +695,7 @@ impl GoodWeaponScanner {
                     ScanAction::Continue
                 }
             },
+            GridEvent::PageTail { .. } => ScanAction::Continue,
             GridEvent::PageScrolled => {
                 visible_layout = None;
                 voter.reset_page();
@@ -732,6 +729,7 @@ impl GoodWeaponScanner {
                     layout.page_start_idx,
                     layout.page_items,
                     layout.screen_start_row,
+                    None,
                 );
                 if emit_ready(ready, &item_tx).is_err() {
                     return ScanAction::Stop;

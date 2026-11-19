@@ -65,13 +65,44 @@ pub const ITEMS_PER_PAGE: usize = 40;
 const CARD_W: f64 = 123.5; // 247 / 2
 const CARD_H: f64 = 153.0; // 306 / 2
 
-/// Visual card centers, which differ from the deliberately inset legacy click
-/// spacing. Use these for selection-rim/occupancy evidence, not click geometry.
-pub fn artifact_cell_center(row: usize, col: usize) -> (f64, f64) {
+/// The visual card spacing differs from the deliberately inset click coordinates.
+pub(super) fn artifact_cell_center(row: usize, col: usize) -> (f64, f64) {
     (
         GRID_CX + col as f64 * GRID_OX,
         GRID_CY + row as f64 * GRID_OY,
     )
+}
+
+fn card_edge_at(image: &RgbImage, scaler: &CoordScaler, edge_x: f64, y: u32) -> bool {
+    (-3..=3).any(|dx| {
+        let x = edge_x + dx as f64;
+        let left = image.get_pixel_checked(scaler.x(x - 2.0) as u32, y);
+        let right = image.get_pixel_checked(scaler.x(x + 2.0) as u32, y);
+        left.zip(right)
+            .is_some_and(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 12))
+    })
+}
+
+/// One past the last visible inventory card, including material stacks.
+/// Both sides must be visible at the same heights. Sample above and below
+/// the filter overlay so even the clipped bottom row can supply both edges.
+pub(super) fn visible_artifact_extent(image: &RgbImage, scaler: &CoordScaler) -> usize {
+    let half_width = (CARD_W / 2.0).round();
+    (0..ITEMS_PER_PAGE)
+        .rfind(|index| {
+            let (cx, cy) = artifact_cell_center(index / COLS, index % COLS);
+            (-64..=40)
+                .step_by(4)
+                .filter(|dy| {
+                    let y = scaler.y(cy + *dy as f64) as u32;
+                    card_edge_at(image, scaler, cx - half_width, y)
+                        && card_edge_at(image, scaler, cx + half_width, y)
+                })
+                .take(6)
+                .count()
+                == 6
+        })
+        .map_or(0, |index| index + 1)
 }
 
 /// Width of the bright band above each row gap used for Y edge detection.
@@ -229,7 +260,10 @@ impl GridPageDetection {
     /// Get the majority-vote result for an absolute item index.
     /// Returns `None` if the index is outside this page.
     pub fn get(&self, abs_index: usize) -> Option<GridIconResult> {
-        if abs_index < self.page_start || abs_index >= self.page_start + self.page_items {
+        if self.pass_count() == 0
+            || abs_index < self.page_start
+            || abs_index >= self.page_start + self.page_items
+        {
             return None;
         }
         let i = abs_index - self.page_start;
@@ -614,6 +648,62 @@ fn is_elixir_color(color: &(f64, f64, f64)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_extent_preserves_every_last_card_and_excludes_empty_filter_background() {
+        use image::imageops::{crop_imm, replace, resize, FilterType};
+
+        // Edge strips from four occupied and four empty positions on real
+        // inventory pages. They include purple cards against a purple backdrop,
+        // partially clipped bottom-row cards and the filter over empty slots.
+        const TILE: u32 = 144;
+        let edges = image::load_from_memory(include_bytes!(
+            "../../../tests/fixtures/artifact_grid_edges.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        for (width, height) in [(960, 540), (1280, 720), (1920, 1080), (3840, 2160)] {
+            let scaler = CoordScaler::new(width, height);
+            let mut screen = RgbImage::new(width, height);
+            let tiles: Vec<_> = (0..8)
+                .map(|i| {
+                    let tile = crop_imm(&edges, i % 4 * TILE, i / 4 * TILE, TILE, TILE).to_image();
+                    resize(
+                        &tile,
+                        scaler.x(TILE as f64) as u32,
+                        scaler.y(TILE as f64) as u32,
+                        FilterType::Triangle,
+                    )
+                })
+                .collect();
+            let draw = |screen: &mut RgbImage, index: usize, tile: usize| {
+                let (cx, cy) = artifact_cell_center(index / COLS, index % COLS);
+                replace(
+                    screen,
+                    &tiles[tile],
+                    scaler.x(cx - 72.0) as i64,
+                    scaler.y(cy - 72.0) as i64,
+                );
+            };
+            for index in 0..ITEMS_PER_PAGE {
+                draw(&mut screen, index, 4 + index % 4);
+            }
+            assert_eq!(
+                visible_artifact_extent(&screen, &scaler),
+                0,
+                "empty at {width}x{height}"
+            );
+            for index in 0..ITEMS_PER_PAGE {
+                draw(&mut screen, index, index % 4);
+                assert_eq!(
+                    visible_artifact_extent(&screen, &scaler),
+                    index + 1,
+                    "last card {} at {width}x{height}",
+                    index + 1
+                );
+            }
+        }
+    }
 
     #[test]
     fn grid_y_normalization_corrects_lower_edge_alias() {

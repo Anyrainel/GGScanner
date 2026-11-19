@@ -8,7 +8,9 @@ dumps/
 **/*.png
 !assets/*.png
 !genshin/tests/fixtures/artifact_panel.png
-!genshin/tests/fixtures/artifact_filter_overlay.png
+!genshin/tests/fixtures/artifact_grid_edges.png
+!genshin/tests/fixtures/artifact_scrollbar.png
+!genshin/tests/fixtures/artifact_skipped_grid.png
 !experimental/hsr/tests/fixtures/abundance_partial_trace_nodes.png
 !experimental/hsr/src/assets/equipped_path_badges.png
 **tmp**

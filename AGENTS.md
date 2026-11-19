@@ -342,14 +342,16 @@ All fields are hard-match (reject on mismatch): set, slot, rarity, level, main s
 
 ### Lock toggle flow (lock_manager.rs)
 
-Per-page: scan all items via pipelined OCR → match against targets → re-click matched positions → toggle lock → verify pixel. Page-skip optimization: in fast mode, OCR the last item's level first; if > max target level, skip the page entirely (inventory sorted by level descending).
-
-Ordinary artifact scanning, manager page probes, and manager target re-selection
-share `scanner/common/artifact_panel.rs`. It waits for changed, readable details,
-target selection, and cross-frame stability; only a full timeout permits bounded
-retry/reference clicks. OCR receives the accepted screenshot, never an unchecked
-timeout capture. Page-local detail fingerprints also guard manager re-selection;
-invalidate this cache after navigation. Weapon fixed-delay waits are separate.
+Scan artifact cells in order. Click each new cell once and poll the right detail
+panel. Read early when the panel changes and settles, or use its current frame
+at the configured deadline. Identical details do not trigger recovery clicks.
+Fast management may skip consecutive leading pages when the last cell is an
+occupied five-star artifact above every target's level. Stop probing after the
+first page that needs scanning and reuse its captured tail. Scroll in place.
+Match whole ordered rows of detail to identify overlap and confirm trailing
+empty slots in the backpack traversal. At the end of each scanned page the
+Manager reopens only matched targets, verifies their identity, reads the lock
+state, toggles if needed, and verifies the result before scrolling.
 
 ### Snapshot (orchestrator.rs)
 

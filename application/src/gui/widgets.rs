@@ -496,7 +496,7 @@ pub fn inventory_delays(ui: &mut egui::Ui, state: &mut AppState, l: Lang) {
         (l.t("圣遗物初始等待", "Artifact initial wait"), &mut state.user_config.artifact_initial_wait, defaults.artifact_initial_wait,
             l.t("点击圣遗物后、开始检测面板变化前的最小等待", "Minimum wait after clicking an artifact before starting panel change detection")),
         (l.t("圣遗物面板超时", "Artifact panel timeout"), &mut state.user_config.artifact_panel_timeout, defaults.artifact_panel_timeout,
-            l.t("等待详情更新并稳定的时间上限；超时后重试确认", "Wait limit for updated, stable details; retry confirmation on timeout")),
+            l.t("详情变化并稳定后立即读取；到达上限时读取当前详情", "Read the detail panel as soon as it settles, or use the current panel at the time limit")),
         (l.t("圣遗物额外延迟", "Artifact extra delay"), &mut state.user_config.artifact_extra_delay, defaults.artifact_extra_delay,
             l.t("延长详情保持稳定的确认时间；等待期间仍会检查画面（通常为0）", "Extend the stable-detail confirmation time while continuing to check the image (usually 0)")),
     ]);

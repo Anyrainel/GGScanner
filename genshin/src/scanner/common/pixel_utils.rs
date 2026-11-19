@@ -128,21 +128,12 @@ pub fn is_artifact_icon_ambiguous(image: &RgbImage, scaler: &CoordScaler) -> boo
 /// locked and unlocked states. Both calibrated pixels must agree on a stable
 /// side of the brightness gap before a manager action treats the panel state
 /// as authoritative.
-pub fn is_artifact_lock_ambiguous(image: &RgbImage, scaler: &CoordScaler, y_shift: f64) -> bool {
-    use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2};
-
-    let b1 = get_pixel_brightness(
-        image,
-        scaler,
-        ARTIFACT_LOCK_POS1.0,
-        ARTIFACT_LOCK_POS1.1 + y_shift,
-    );
-    let b2 = get_pixel_brightness(
-        image,
-        scaler,
-        ARTIFACT_LOCK_POS2.0,
-        ARTIFACT_LOCK_POS2.1 + y_shift,
-    );
+pub fn is_artifact_lock_ambiguous(
+    frame: &CaptureFrame,
+    scaler: &CoordScaler,
+    y_shift: f64,
+) -> bool {
+    let [b1, b2] = artifact_lock_brightness(frame, scaler, y_shift);
     let p1 = b1 < 128;
     let p2 = b2 < 128;
 
@@ -222,22 +213,26 @@ pub fn detect_dark_icon(
 /// profile-specific threshold so that detector has margin in both modes.
 pub fn is_five_star_filter_active(image: &RgbImage, scaler: &CoordScaler) -> bool {
     use super::constants::ARTIFACT_FIVE_STAR_FILTER_POS;
+    five_star_filter_track_active(image, scaler, ARTIFACT_FIVE_STAR_FILTER_POS)
+}
+
+/// The track position is relative to the supplied screenshot.
+pub(crate) fn five_star_filter_track_active(
+    image: &RgbImage,
+    scaler: &CoordScaler,
+    track: (f64, f64),
+) -> bool {
     let threshold = if super::pixel_profile::is_hdr_mode() {
         120
     } else {
         128
     };
-    let brightness = get_pixel_brightness(
-        image,
-        scaler,
-        ARTIFACT_FIVE_STAR_FILTER_POS.0,
-        ARTIFACT_FIVE_STAR_FILTER_POS.1,
-    );
+    let brightness = get_pixel_brightness(image, scaler, track.0, track.1);
     let active = brightness >= threshold;
     if active {
         log_debug!(
-            "[backpack] 检测到五星排序筛选已开启，将点击关闭(brightness={}, threshold={})",
-            "[backpack] 5-star sort filter detected as active, will click to dismiss (brightness={}, threshold={})",
+            "[backpack] 五星圣遗物按获得时间排序已开启 (brightness={}, threshold={})",
+            "[backpack] Five-star artifacts are sorted by acquisition time (brightness={}, threshold={})",
             brightness,
             threshold
         );
@@ -531,21 +526,46 @@ pub fn detect_weapon_lock(image: &RgbImage, scaler: &CoordScaler) -> bool {
 /// Supports y_shift for elixir-crafted artifacts.
 ///
 /// Port of `detectArtifactLock()` from GOODScanner/lib/ocr_utils.js
-pub fn detect_artifact_lock(image: &RgbImage, scaler: &CoordScaler, y_shift: f64) -> bool {
+pub fn detect_artifact_lock(frame: &CaptureFrame, scaler: &CoordScaler, y_shift: f64) -> bool {
     use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2};
-    let locked = detect_dark_icon(
-        image,
+    let (pos, rgb, locked) = read_artifact_icon(
+        frame,
         scaler,
-        ARTIFACT_LOCK_POS1.0,
-        ARTIFACT_LOCK_POS1.1 + y_shift,
-        ARTIFACT_LOCK_POS2.0,
-        ARTIFACT_LOCK_POS2.1 + y_shift,
-        "\u{5723}\u{9057}\u{7269}\u{9501}\u{5B9A}", // 圣遗物锁定
+        [ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2],
+        y_shift,
     );
-    let pos = (ARTIFACT_LOCK_POS1.0, ARTIFACT_LOCK_POS1.1 + y_shift);
-    let rgb = read_pixel_rgb(image, scaler, pos.0, pos.1);
     super::annotator::record_pixel("lock", pos, rgb, if locked { "locked" } else { "unlocked" });
     locked
+}
+
+fn brightness([r, g, b]: [u8; 3]) -> u32 {
+    (u32::from(r) + u32::from(g) + u32::from(b)) / 3
+}
+
+fn read_artifact_icon(
+    frame: &CaptureFrame,
+    scaler: &CoordScaler,
+    positions: [(f64, f64); 2],
+    y_shift: f64,
+) -> ((f64, f64), [u8; 3], bool) {
+    let [first, second] = positions.map(|(x, y)| frame.pixel(scaler, x, y + y_shift));
+    let present = brightness(first) < 128;
+    if present != (brightness(second) < 128) {
+        log_debug!(
+            "圣遗物图标像素不一致 ({:?}): {:?} / {:?}",
+            "Artifact icon pixels disagree ({:?}): {:?} / {:?}",
+            positions[0],
+            first,
+            second
+        );
+    }
+    ((positions[0].0, positions[0].1 + y_shift), first, present)
+}
+
+fn artifact_lock_brightness(frame: &CaptureFrame, scaler: &CoordScaler, y_shift: f64) -> [u32; 2] {
+    use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2};
+    [ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2]
+        .map(|(x, y)| brightness(frame.pixel(scaler, x, y + y_shift)))
 }
 
 /// Verify that an artifact lock toggle succeeded, using asymmetric brightness
@@ -567,24 +587,12 @@ pub fn detect_artifact_lock(image: &RgbImage, scaler: &CoordScaler, y_shift: f64
 ///
 /// Checks both POS1 and POS2; either passing counts as verified.
 pub fn verify_artifact_lock_toggled(
-    image: &RgbImage,
+    frame: &CaptureFrame,
     scaler: &CoordScaler,
     y_shift: f64,
     desired_lock: bool,
 ) -> bool {
-    use super::constants::{ARTIFACT_LOCK_POS1, ARTIFACT_LOCK_POS2};
-    let b1 = get_pixel_brightness(
-        image,
-        scaler,
-        ARTIFACT_LOCK_POS1.0,
-        ARTIFACT_LOCK_POS1.1 + y_shift,
-    );
-    let b2 = get_pixel_brightness(
-        image,
-        scaler,
-        ARTIFACT_LOCK_POS2.0,
-        ARTIFACT_LOCK_POS2.1 + y_shift,
-    );
+    let [b1, b2] = artifact_lock_brightness(frame, scaler, y_shift);
     let ok = if desired_lock {
         // Expect darkening: below "definitely bright" threshold
         b1 < ICON_BRIGHT_ABSENT || b2 < ICON_BRIGHT_ABSENT
@@ -607,19 +615,18 @@ pub fn verify_artifact_lock_toggled(
 /// Supports y_shift for elixir-crafted artifacts.
 ///
 /// Port of `detectArtifactAstralMark()` from GOODScanner/lib/ocr_utils.js
-pub fn detect_artifact_astral_mark(image: &RgbImage, scaler: &CoordScaler, y_shift: f64) -> bool {
+pub fn detect_artifact_astral_mark(
+    frame: &CaptureFrame,
+    scaler: &CoordScaler,
+    y_shift: f64,
+) -> bool {
     use super::constants::{ARTIFACT_ASTRAL_POS1, ARTIFACT_ASTRAL_POS2};
-    let marked = detect_dark_icon(
-        image,
+    let (pos, rgb, marked) = read_artifact_icon(
+        frame,
         scaler,
-        ARTIFACT_ASTRAL_POS1.0,
-        ARTIFACT_ASTRAL_POS1.1 + y_shift,
-        ARTIFACT_ASTRAL_POS2.0,
-        ARTIFACT_ASTRAL_POS2.1 + y_shift,
-        "\u{5723}\u{9057}\u{7269}\u{6536}\u{85CF}", // 圣遗物收藏
+        [ARTIFACT_ASTRAL_POS1, ARTIFACT_ASTRAL_POS2],
+        y_shift,
     );
-    let pos = (ARTIFACT_ASTRAL_POS1.0, ARTIFACT_ASTRAL_POS1.1 + y_shift);
-    let rgb = read_pixel_rgb(image, scaler, pos.0, pos.1);
     super::annotator::record_pixel(
         "astral",
         pos,
@@ -895,7 +902,11 @@ mod tests {
         let mut image = make_1080p_image();
         paint_artifact_lock(&mut image, true, 0.0);
         let scaler = make_1080p_scaler();
-        assert!(detect_artifact_lock(&image, &scaler, 0.0));
+        assert!(detect_artifact_lock(
+            &CaptureFrame::full(image),
+            &scaler,
+            0.0
+        ));
     }
 
     #[test]
@@ -903,7 +914,11 @@ mod tests {
         let mut image = make_1080p_image();
         paint_artifact_lock(&mut image, false, 0.0);
         let scaler = make_1080p_scaler();
-        assert!(!detect_artifact_lock(&image, &scaler, 0.0));
+        assert!(!detect_artifact_lock(
+            &CaptureFrame::full(image),
+            &scaler,
+            0.0
+        ));
     }
 
     #[test]
@@ -914,8 +929,9 @@ mod tests {
         // Paint locked at shifted position
         paint_artifact_lock(&mut image, true, 40.0);
         let scaler = make_1080p_scaler();
-        assert!(!detect_artifact_lock(&image, &scaler, 0.0));
-        assert!(detect_artifact_lock(&image, &scaler, 40.0));
+        let frame = CaptureFrame::full(image);
+        assert!(!detect_artifact_lock(&frame, &scaler, 0.0));
+        assert!(detect_artifact_lock(&frame, &scaler, 40.0));
     }
 
     #[test]
@@ -923,7 +939,11 @@ mod tests {
         let mut image = make_1080p_image();
         paint_artifact_astral(&mut image, true, 0.0);
         let scaler = make_1080p_scaler();
-        assert!(detect_artifact_astral_mark(&image, &scaler, 0.0));
+        assert!(detect_artifact_astral_mark(
+            &CaptureFrame::full(image),
+            &scaler,
+            0.0
+        ));
     }
 
     #[test]
@@ -931,7 +951,11 @@ mod tests {
         let mut image = make_1080p_image();
         paint_artifact_astral(&mut image, false, 0.0);
         let scaler = make_1080p_scaler();
-        assert!(!detect_artifact_astral_mark(&image, &scaler, 0.0));
+        assert!(!detect_artifact_astral_mark(
+            &CaptureFrame::full(image),
+            &scaler,
+            0.0
+        ));
     }
 
     #[test]
@@ -976,12 +1000,43 @@ mod tests {
         paint_artifact_lock(&mut image, false, 0.0);
         paint_artifact_lock(&mut image, true, 40.0);
 
-        assert!(!is_artifact_lock_ambiguous(&image, &scaler, 40.0));
+        let mut frame = CaptureFrame::full(image);
+        assert!(!is_artifact_lock_ambiguous(&frame, &scaler, 40.0));
 
         let mid: [u8; 3] = [150, 150, 150];
-        set_pixel(&mut image, 1683, 468, mid);
-        set_pixel(&mut image, 1768, 468, mid);
-        assert!(is_artifact_lock_ambiguous(&image, &scaler, 40.0));
+        set_pixel(&mut frame.image, 1683, 468, mid);
+        set_pixel(&mut frame.image, 1768, 468, mid);
+        assert!(is_artifact_lock_ambiguous(&frame, &scaler, 40.0));
+    }
+
+    #[test]
+    fn cropped_artifact_details_read_and_verify_lock_at_the_same_game_pixels() {
+        use super::super::constants::ARTIFACT_DETAIL_PANEL_RECT;
+        let scaler = make_1080p_scaler();
+        let mut image = make_1080p_image();
+        paint_artifact_lock(&mut image, false, 0.0);
+        paint_artifact_astral(&mut image, false, 0.0);
+        paint_artifact_lock(&mut image, true, 40.0);
+        paint_artifact_astral(&mut image, true, 40.0);
+        let full = CaptureFrame::full(image);
+        let rect = ARTIFACT_DETAIL_PANEL_RECT;
+        let detail = CaptureFrame {
+            image: full.crop(rect, 0.0, &scaler).unwrap(),
+            origin: (rect.0, rect.1),
+        };
+        for frame in [&full, &detail] {
+            for (shift, expected) in [(0.0, false), (40.0, true)] {
+                assert_eq!(detect_artifact_lock(frame, &scaler, shift), expected);
+                assert_eq!(detect_artifact_astral_mark(frame, &scaler, shift), expected);
+                assert!(!is_artifact_lock_ambiguous(frame, &scaler, shift));
+                assert!(verify_artifact_lock_toggled(
+                    frame, &scaler, shift, expected
+                ));
+                assert!(!verify_artifact_lock_toggled(
+                    frame, &scaler, shift, !expected
+                ));
+            }
+        }
     }
 
     #[test]

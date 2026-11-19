@@ -5,8 +5,8 @@ use crossbeam_channel;
 
 use yas::{log_debug, log_info, log_warn};
 
-use super::ui_actions::{d_action, d_cell};
-use crate::scanner::artifact::GoodArtifactScanner;
+use super::ui_actions::d_cell;
+use crate::scanner::artifact::{ArtifactScanResult, GoodArtifactScanner};
 use crate::scanner::common::annotator;
 use crate::scanner::common::artifact_panel::{
     ArtifactCell, ArtifactPanelOptions, ArtifactSelection,
@@ -16,14 +16,12 @@ use crate::scanner::common::backpack_scanner::{
     ScanTermination,
 };
 use crate::scanner::common::capture_frame::CaptureFrame;
-use crate::scanner::common::constants::*;
+use crate::scanner::common::constants::{ARTIFACT_DETAIL_PANEL_RECT, ARTIFACT_LOCK_POS1};
 use crate::scanner::common::coord_scaler::CoordScaler;
 use crate::scanner::common::debug_dump::DumpCtx;
 use crate::scanner::common::game_controller::GenshinGameController;
 use crate::scanner::common::grid_icon_detector::{GridIconResult, GridMode};
-use crate::scanner::common::grid_voter::{
-    GridAnnotation, GridVoteSchedule, PagedGridVoter, ReadyItem,
-};
+use crate::scanner::common::grid_voter::{PagedGridVoter, ReadyItem};
 use crate::scanner::common::mappings::MappingManager;
 use crate::scanner::common::models::GoodArtifact;
 use crate::scanner::common::ocr_pool::{OcrPool, SharedOcrPools};
@@ -53,13 +51,11 @@ pub struct LockManager {
 struct PageLockAction {
     /// Absolute scanned artifact index.
     scanned_idx: usize,
-    result_id: String,
+    target_idx: usize,
     /// Row within the current visible page (0-based).
     row: usize,
     /// Column (0-based).
     col: usize,
-    /// Desired lock state.
-    desired_lock: bool,
     /// Lock state reported by the fast grid detector.
     grid_lock: bool,
     /// Y-shift for elixir artifacts.
@@ -147,10 +143,19 @@ fn set_filter_plan(requested_count: usize, selected_count: usize) -> SetFilterPl
     }
 }
 
-fn should_stop_at_rarity_boundary(below_min_rarity: bool, level: i32) -> bool {
-    // scan_level_only uses -1 as its OCR-failure sentinel. Only a confirmed
-    // level 0 item proves that the sorted >=4-star section has ended.
-    below_min_rarity && level == 0
+fn should_stop_at_rarity_boundary(below_min_rarity: bool, level: Option<i32>) -> bool {
+    below_min_rarity && level == Some(0)
+}
+
+fn page_tail_above_targets(
+    frame: &CaptureFrame,
+    scaler: &CoordScaler,
+    ocr: &dyn yas::ocr::ImageToText<image::RgbImage>,
+    highest_target_level: i32,
+) -> bool {
+    pixel_utils::detect_artifact_rarity_evidence(frame, scaler) == Some(5)
+        && GoodArtifactScanner::scan_level_only(ocr, frame, scaler)
+            .is_some_and(|level| level > highest_target_level)
 }
 
 fn repeated_rarity_below_min(first: Option<i32>, second: Option<i32>, min_rarity: i32) -> bool {
@@ -173,7 +178,6 @@ fn scan_proves_absence(
     termination: ScanTermination,
     rarity_stopped: bool,
     missed_count: usize,
-    skipped_count: usize,
     identity_failure_count: usize,
     scanned_count: usize,
     observed_count: usize,
@@ -181,7 +185,6 @@ fn scan_proves_absence(
 ) -> bool {
     let reached_observed_count = scanned_count >= observed_count;
     missed_count == 0
-        && skipped_count == 0
         && identity_failure_count == 0
         && !filtered_or_uncertain
         && (rarity_stopped || (reached_observed_count && termination == ScanTermination::EmptyCell))
@@ -216,7 +219,23 @@ fn update_scanned_lock_state(
     }
 }
 
-type OcrResult = (usize, usize, usize, Option<GoodArtifact>);
+type OcrResult = (usize, usize, usize, ArtifactScanResult);
+
+fn dump_lock_panel(
+    category: &str,
+    index: usize,
+    frame: &CaptureFrame,
+    y_shift: f64,
+    scaler: &CoordScaler,
+) {
+    let ctx = DumpCtx::new("debug_images", category, index, "");
+    ctx.dump_full(&frame.image);
+    let center = (
+        ARTIFACT_LOCK_POS1.0 - frame.origin.0,
+        ARTIFACT_LOCK_POS1.1 + y_shift - frame.origin.1,
+    );
+    ctx.dump_pixel("lock_px", &frame.image, center, 5, scaler);
+}
 
 fn spawn_identify_artifact_task(
     idx: usize,
@@ -224,7 +243,6 @@ fn spawn_identify_artifact_task(
     col: usize,
     frame: CaptureFrame,
     grid_icons: Option<GridIconResult>,
-    grid_annotation: Option<GridAnnotation>,
     tx: crossbeam_channel::Sender<OcrResult>,
     ocr_pool: Arc<OcrPool>,
     substat_pool: Arc<OcrPool>,
@@ -235,13 +253,10 @@ fn spawn_identify_artifact_task(
         let _native_crash_context = yas::native_crash::inherit_current_task();
         annotator::begin_item("manager_artifacts", idx, &scaler);
         annotator::add_frame("panel", &frame);
-        if let Some(ref ann) = grid_annotation {
-            annotator::record_grid_overlay(ann.0.clone(), ann.1.clone());
-        }
 
         let ocr = ocr_pool.get();
         let sub_ocr = substat_pool.get();
-        let artifact = match GoodArtifactScanner::identify_artifact_at(
+        let artifact = match GoodArtifactScanner::identify_panel_item_at(
             &ocr as &dyn yas::ocr::ImageToText<image::RgbImage>,
             &sub_ocr as &dyn yas::ocr::ImageToText<image::RgbImage>,
             &frame,
@@ -259,7 +274,7 @@ fn spawn_identify_artifact_task(
                     e
                 );
                 annotator::finalize_error(None, &e.to_string());
-                None
+                ArtifactScanResult::Skip
             },
         };
         let _ = tx.send((idx, row, col, artifact));
@@ -294,7 +309,6 @@ impl LockManager {
         initial_wait: u64,
         stop_on_all_matched: bool,
         filter_involved_sets: bool,
-        max_target_level: i32,
         dump_images: bool,
         progress_fn: Option<&crate::scanner::common::progress::ProgressFn<'_>>,
     ) -> (
@@ -559,10 +573,6 @@ impl LockManager {
         let scaler = ctrl.scaler.clone();
         let scaler_arc = Arc::new(scaler.clone());
 
-        // Pre-focus the first grid cell (unchanged behavior from previous impl).
-        ctrl.click_at(GRID_FIRST_X, GRID_FIRST_Y);
-        yas::utils::sleep(d_action() * 3 / 8);
-
         // --- Per-page callback state ---
         // A fresh OCR result channel is created before each page; PageCompleted
         // drains it and re-creates one for the next page.
@@ -580,14 +590,19 @@ impl LockManager {
         let mut rarity_stopped = false;
         let mut stop_requested = false;
         let mut lock_action_counter: usize = 0;
-        // Once the last-cell probe shows a level within range (or OCR succeeds
-        // with level <= max_target_level), we stop probing and scan every item.
-        // OCR failure (-1) does NOT count as "in range" — keep probing.
-        let mut level_in_range = false;
-
-        // Build a scan_grid config that enables the per-page level probe
-        // when a max target level has been computed (fast mode).
+        let mut skipped_leading_page = false;
+        // The normal order is descending level across all rarities. Include
+        // four-star targets in the threshold before skipping any leading page.
+        let highest_target_level = targets
+            .iter()
+            .map(|target| target.artifact.level)
+            .max()
+            .expect("nonempty lock targets");
+        let probe_leading_pages = stop_on_all_matched
+            && (0..20).contains(&highest_target_level)
+            && backpack_scanner::read_recent_sort(ctrl).is_ok_and(|(_, active)| !active);
         let scan_config = BackpackScanConfig {
+            probe_leading_pages,
             delay_scroll,
             panel_wait: PanelWaitMode::Artifact {
                 timeout_ms: panel_timeout,
@@ -595,14 +610,10 @@ impl LockManager {
                 stop_on_failure: false,
             },
             extra_delay: capture_delay,
-            detail_panel_rect: None,
-            grid_vote_schedule: GridVoteSchedule::for_page,
-            probe_last_cell_per_page: max_target_level >= 0,
             // The OCR count is only a hint; traverse up to the confirmed
             // inventory capacity and use visual occupancy/page-end evidence to
             // find the real boundary. This also handles filtered inventories,
             // whose header keeps showing the unfiltered count.
-            detect_grid_duplicates: false,
             detect_empty_cells: true,
             min_items_before_visual_end: visual_end_floor(
                 scan_bounds.observed_count,
@@ -625,45 +636,15 @@ impl LockManager {
         let mut bp = BackpackScanner::new(ctrl);
         let scan_outcome = bp.scan_grid(total, &scan_config, 0, |ctrl_cb, event| {
             match event {
-                // ---------------- Page probe: level-based skip ----------------
-                GridEvent::PageStarted { page_start_idx, last_cell_image } => {
-                    if max_target_level < 0 || level_in_range {
-                        return ScanAction::Continue;
+                GridEvent::PageTail { frame } => {
+                    let ocr = ocr_pool_cb.get();
+                    if page_tail_above_targets(frame, &scaler_cb, &ocr, highest_target_level) {
+                        skipped_leading_page = true;
+                        return ScanAction::SkipPage;
                     }
-                    let ocr_guard = ocr_pool_cb.get();
-                    let probe_frame = CaptureFrame::full(last_cell_image);
-                    let level = GoodArtifactScanner::scan_level_only(
-                        &ocr_guard as &dyn yas::ocr::ImageToText<image::RgbImage>,
-                        &probe_frame,
-                        &scaler_cb,
-                    );
-                    if level > max_target_level {
-                        log_debug!(
-                            "[lock_manager] 页面跳过：末尾等级={} > 最高目标等级={} (page_start={})",
-                            "[lock_manager] Page skip: last level={} > max target={} (page_start={})",
-                            level, max_target_level, page_start_idx
-                        );
-                        ScanAction::SkipPage
-                    } else if level >= 0 {
-                        // Level is in range — stop probing on future pages.
-                        level_in_range = true;
-                        log_debug!(
-                            "[lock_manager] 末尾等级={} 在范围内，后续页面不再探测 (page_start={})",
-                            "[lock_manager] Last level={} in range, disabling probe for future pages (page_start={})",
-                            level, page_start_idx
-                        );
-                        ScanAction::Continue
-                    } else {
-                        // OCR failed (-1) — scan this page but keep probing.
-                        log_debug!(
-                            "[lock_manager] 末尾等级OCR失败，扫描此页但继续探测 (page_start={})",
-                            "[lock_manager] Last level OCR failed, scanning page but keeping probe (page_start={})",
-                            page_start_idx
-                        );
-                        ScanAction::Continue
-                    }
+                    // This page and all later pages follow normal row-major traversal.
+                    ScanAction::Continue
                 }
-
                 // ---------------- Per-item voting + OCR dispatch ----------------
                 GridEvent::Item {
                     idx,
@@ -671,6 +652,7 @@ impl LockManager {
                     col,
                     layout,
                     frame,
+                    grid_image,
                 } => {
                     // Tick progress per item as we walk through the backpack.
                     // Reports (idx+1, backpack_total) so clients see a real
@@ -692,14 +674,13 @@ impl LockManager {
                             let (d_row, d_col) = item.payload;
                             let d_frame = item.frame;
                             let gi: Option<GridIconResult> = item.metadata;
-                            let ann = item.grid_annotation;
                             let tx = result_tx.clone();
                             let pool = ocr_pool_cb.clone();
                             let sub_pool = substat_pool_cb.clone();
                             let sc = scaler_arc.clone();
                             let mp = mappings_cb.clone();
                             spawn_identify_artifact_task(
-                                d_idx, d_row, d_col, d_frame, gi, ann, tx, pool, sub_pool, sc, mp,
+                                d_idx, d_row, d_col, d_frame, gi, tx, pool, sub_pool, sc, mp,
                             );
                             *dispatched += 1;
                         }
@@ -713,15 +694,15 @@ impl LockManager {
                         &scaler_cb,
                     );
                     let mut settled_frame = None;
-                    let below_min_rarity = if first_rarity.is_some_and(|rarity| rarity < 4) {
-                        // The star row is outside the fast panel fingerprint.
-                        // Confirm the same low-rarity geometry in a later full
-                        // capture so a partially rendered 4/5-star row cannot
-                        // become an authoritative inventory boundary.
+                    // A prefetched row can deliver older frames while the last
+                    // cell is still selected. Only re-read the item's own panel.
+                    let still_selected = ctrl_cb.last_artifact_cell() == Some(ArtifactCell { row, col });
+                    let below_min_rarity = if still_selected && first_rarity.is_some_and(|rarity| rarity < 4) {
+                        // Confirm the star row after animation before treating it
+                        // as the end of the relevant inventory.
                         yas::utils::sleep(100);
-                        match ctrl_cb.capture_game() {
-                            Ok(image) => {
-                                let second_frame = CaptureFrame::full(image);
+                        match CaptureFrame::from_region(ctrl_cb, ARTIFACT_DETAIL_PANEL_RECT) {
+                            Ok(second_frame) => {
                                 let second_rarity = pixel_utils::detect_artifact_rarity_evidence(
                                     &second_frame,
                                     &scaler_cb,
@@ -748,7 +729,7 @@ impl LockManager {
                         let guard = ocr_pool_cb.get();
                         GoodArtifactScanner::scan_level_only(&guard, evidence_frame, &scaler_cb)
                     } else {
-                        -1
+                        None
                     };
                     if should_stop_at_rarity_boundary(below_min_rarity, boundary_level) {
                         log_debug!(
@@ -757,12 +738,12 @@ impl LockManager {
                         );
                         rarity_stopped = true;
                         stop_requested = true;
-                        voter.finish_additional_passes(&scaler_cb, || ctrl_cb.capture_game().ok());
+                        voter.finish_additional_passes(&scaler_cb, || ctrl_cb.capture_artifact_grid().ok());
                         let ready = voter.early_stop_flush();
                         dispatch(ready, &mut dispatched);
                         return ScanAction::Stop;
                     }
-                    if below_min_rarity && boundary_level < 0 {
+                    if below_min_rarity && boundary_level.is_none() {
                         log_warn!(
                             "[lock_manager] 检测到低稀有度外观，但等级OCR失败；无法确认边界，将继续扫描",
                             "[lock_manager] The item looked low-rarity but level OCR failed; the inventory boundary is unconfirmed, continuing the scan"
@@ -778,6 +759,7 @@ impl LockManager {
                         layout.page_start_idx,
                         layout.page_items,
                         layout.screen_start_row,
+                        grid_image.as_ref(),
                     );
                     dispatch(ready, &mut dispatched);
 
@@ -788,21 +770,20 @@ impl LockManager {
                 GridEvent::PageCompleted { .. } => {
                     // Finish short-page voting while the current page is still
                     // visible; final_flush only drains settled metadata.
-                    voter.finish_additional_passes(&scaler_cb, || ctrl_cb.capture_game().ok());
+                    voter.finish_additional_passes(&scaler_cb, || ctrl_cb.capture_artifact_grid().ok());
                     let leftover = voter.final_flush();
                     for item in leftover {
                         let d_idx = item.idx;
                         let (d_row, d_col) = item.payload;
                         let d_frame = item.frame;
                         let gi: Option<GridIconResult> = item.metadata;
-                        let ann = item.grid_annotation;
                         let tx = result_tx.clone();
                         let pool = ocr_pool_cb.clone();
                         let sub_pool = substat_pool_cb.clone();
                         let sc = scaler_arc.clone();
                         let mp = mappings_cb.clone();
                         spawn_identify_artifact_task(
-                            d_idx, d_row, d_col, d_frame, gi, ann, tx, pool, sub_pool, sc, mp,
+                            d_idx, d_row, d_col, d_frame, gi, tx, pool, sub_pool, sc, mp,
                         );
                         dispatched += 1;
                     }
@@ -833,8 +814,8 @@ impl LockManager {
                     // re-opened below so the settled panel decides whether the
                     // manager toggles or reports AlreadyCorrect.
                     let mut page_actions: Vec<PageLockAction> = Vec::new();
-                    for (idx, row, col, artifact_opt) in &page_results {
-                        if let Some(ref artifact) = artifact_opt {
+                    for (idx, row, col, item) in &page_results {
+                        if let ArtifactScanResult::Artifact(artifact) = item {
                             scanned_artifacts.push((*idx, artifact.clone()));
 
                             let unmatched: Vec<(usize, &GoodArtifact)> = targets.iter()
@@ -847,19 +828,17 @@ impl LockManager {
                                 matching::find_best_match(artifact, &unmatched)
                             {
                                 matched.insert(target_idx, *idx);
-                                let target = &targets[target_idx];
                                 let y_shift = if artifact.elixir_crafted { 40.0 } else { 0.0 };
                                 page_actions.push(PageLockAction {
                                     scanned_idx: *idx,
-                                    result_id: target.result_id.clone(),
+                                    target_idx,
                                     row: *row,
                                     col: *col,
-                                    desired_lock: target.desired_lock,
                                     grid_lock: artifact.lock,
                                     y_shift,
                                 });
                             }
-                        } else {
+                        } else if !matches!(item, ArtifactScanResult::EnhancementMaterial) {
                             ocr_failures += 1;
                         }
                     }
@@ -868,23 +847,10 @@ impl LockManager {
                     // panel, then toggle only when that authoritative state
                     // differs from the requested state.
                     for action in &page_actions {
-                        if ctrl_cb.check_rmb() {
-                            results.insert(
-                                action.result_id.clone(),
-                                InstructionResult::failure(
-                                    action.result_id.clone(),
-                                    InstructionStatus::Aborted,
-                                    "用户已停止此锁定操作。",
-                                    "This lock operation was stopped by the user.",
-                                    None,
-                                ),
-                            );
-                            continue;
-                        }
-
+                        let target = &targets[action.target_idx];
                         let action_idx = lock_action_counter;
                         lock_action_counter += 1;
-                        let mut panel_image = match ctrl_cb.select_artifact(
+                        let mut panel_frame = match ctrl_cb.select_artifact(
                             ArtifactCell { row: action.row, col: action.col },
                             ArtifactPanelOptions {
                                 timeout_ms: panel_timeout,
@@ -892,50 +858,48 @@ impl LockManager {
                                 // Lock icons animate separately from text.
                                 extra_delay_ms: capture_delay.max(d_cell() as u64),
                             },
-                            true,
                         ) {
-                            Ok(ArtifactSelection::Ready(frame)) => frame.image,
+                            Ok(ArtifactSelection::Ready(frame)) => frame,
                             Ok(ArtifactSelection::Cancelled) => {
                                 results.insert(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionResult::failure(
-                                        action.result_id.clone(), InstructionStatus::Aborted,
+                                        target.result_id.clone(), InstructionStatus::Aborted,
                                         "用户已停止此锁定操作。",
                                         "This lock operation was stopped by the user.", None,
                                     ),
                                 );
                                 continue;
                             },
-                            other => {
-                                let error = other.err();
+                            Err(error) => {
                                 log_warn!("[lock_manager] 目标详情未确认，跳过锁定操作", "[lock_manager] Target detail unconfirmed; skipping lock operation");
                                 results.insert(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionResult::failure(
-                                        action.result_id.clone(),
+                                        target.result_id.clone(),
                                         InstructionStatus::UiError,
                                         "无法确认目标圣遗物的详情已加载，因此没有更改锁定状态。",
                                         "The target artifact's detail panel could not be confirmed ready, so its lock state was not changed.",
-                                        error.as_ref(),
+                                        Some(&error),
                                     ),
                                 );
                                 continue;
                             }
                         };
                         if pixel_utils::is_artifact_lock_ambiguous(
-                            &panel_image,
+                            &panel_frame,
                             &scaler_cb,
                             action.y_shift,
                         ) {
                             yas::utils::sleep(d_cell());
-                            panel_image = match ctrl_cb.capture_game() {
-                                Ok(img) => img,
+                            panel_frame = match CaptureFrame::from_region(ctrl_cb, ARTIFACT_DETAIL_PANEL_RECT) {
+                                Ok(frame) => frame,
                                 Err(e) => {
                                     log_warn!("[lock_manager] 面板确认重试截图失败: {}", "[lock_manager] Panel confirmation retry capture failed: {}", e);
                                     results.insert(
-                                        action.result_id.clone(),
+                                        target.result_id.clone(),
                                         InstructionResult::failure(
-                                            action.result_id.clone(),
+                                            target.result_id.clone(),
                                             InstructionStatus::UiError,
                                             "重试后仍无法读取目标圣遗物的详情画面，因此没有更改锁定状态。",
                                             "The target artifact's detail panel still could not be captured after retrying, so its lock state was not changed.",
@@ -946,7 +910,7 @@ impl LockManager {
                                 }
                             };
                             if pixel_utils::is_artifact_lock_ambiguous(
-                                &panel_image,
+                                &panel_frame,
                                 &scaler_cb,
                                 action.y_shift,
                             ) {
@@ -957,9 +921,9 @@ impl LockManager {
                                     action.col
                                 );
                                 results.insert(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionResult::failure(
-                                        action.result_id.clone(),
+                                        target.result_id.clone(),
                                         InstructionStatus::UiError,
                                         "无法可靠判断目标圣遗物当前是否已锁定，因此为避免误操作已跳过。",
                                         "The target artifact's current lock state could not be determined reliably, so it was skipped to avoid a wrong change.",
@@ -969,15 +933,41 @@ impl LockManager {
                                 continue;
                             }
                         }
+                        // The visible identity must still match before sending a lock click.
+                        let identified = {
+                            annotator::begin_item("manager_lock_identity", action_idx, &scaler_cb);
+                            annotator::add_frame("panel", &panel_frame);
+                            let ocr = ocr_pool_cb.get();
+                            let substat_ocr = substat_pool_cb.get();
+                            GoodArtifactScanner::identify_artifact_at(
+                                &ocr, &substat_ocr, &panel_frame, &scaler_cb, &mappings_cb,
+                                action.scanned_idx, None,
+                            )
+                        };
+                        if !matches!(&identified, Ok(Some(item)) if matching::match_score(item, &target.artifact).is_some()) {
+                            if let Err(error) = &identified {
+                                annotator::finalize_error(None, &error.to_string());
+                            }
+                            results.insert(
+                                target.result_id.clone(),
+                                InstructionResult::failure(
+                                    target.result_id.clone(), InstructionStatus::UiError,
+                                    "重新选中后，详情与目标圣遗物未能匹配，已跳过锁定操作。",
+                                    "The selected artifact could not be matched to the request. The lock operation was skipped.",
+                                    identified.as_ref().err(),
+                                ),
+                            );
+                            continue;
+                        }
                         let panel_lock = pixel_utils::detect_artifact_lock(
-                            &panel_image,
+                            &panel_frame,
                             &scaler_cb,
                             action.y_shift,
                         );
                         let (decision, grid_disagrees) = decide_confirmed_lock_action(
                             action.grid_lock,
                             panel_lock,
-                            action.desired_lock,
+                            target.desired_lock,
                         );
                         update_scanned_lock_state(
                             &mut scanned_artifacts,
@@ -996,35 +986,36 @@ impl LockManager {
                             );
                         }
                         if dump_images {
-                            let ctx = DumpCtx::new(
-                                "debug_images", "manager_lock_confirm", action_idx, "",
-                            );
-                            ctx.dump_full(&panel_image);
-                            ctx.dump_pixel(
-                                "lock_px",
-                                &panel_image,
-                                (ARTIFACT_LOCK_POS1.0, ARTIFACT_LOCK_POS1.1 + action.y_shift),
-                                5,
-                                &scaler_cb,
-                            );
+                            dump_lock_panel("manager_lock_confirm", action_idx, &panel_frame, action.y_shift, &scaler_cb);
                         }
                         if decision == ConfirmedLockDecision::AlreadyCorrect {
                             results.insert(
-                                action.result_id.clone(),
+                                target.result_id.clone(),
                                 InstructionResult::outcome(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionStatus::AlreadyCorrect,
                                 ),
                             );
                             continue;
                         }
 
+                        if ctrl_cb.check_rmb() {
+                            results.insert(
+                                target.result_id.clone(),
+                                InstructionResult::failure(
+                                    target.result_id.clone(), InstructionStatus::Aborted,
+                                    "用户已停止此锁定操作。",
+                                    "This lock operation was stopped by the user.", None,
+                                ),
+                            );
+                            continue;
+                        }
                         if let Err(e) = ui_actions::click_lock_button(ctrl_cb, action.y_shift) {
                             log_warn!("[lock_manager] 锁定切换失败: {}", "[lock_manager] Lock toggle failed: {}", e);
                             results.insert(
-                                action.result_id.clone(),
+                                target.result_id.clone(),
                                 InstructionResult::failure(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionStatus::UiError,
                                     "无法点击游戏中的锁定按钮，因此锁定状态没有改变。",
                                     "The in-game lock button could not be clicked, so the lock state was not changed.",
@@ -1035,14 +1026,14 @@ impl LockManager {
                         }
 
                         yas::utils::sleep(d_cell() * 2);
-                        let image = match ctrl_cb.capture_game() {
-                            Ok(img) => img,
+                        let after = match CaptureFrame::from_region(ctrl_cb, ARTIFACT_DETAIL_PANEL_RECT) {
+                            Ok(frame) => frame,
                             Err(e) => {
                                 log_warn!("[lock_manager] 截图失败: {}", "[lock_manager] Capture failed: {}", e);
                                 results.insert(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionResult::failure(
-                                        action.result_id.clone(),
+                                        target.result_id.clone(),
                                         InstructionStatus::UiError,
                                         "点击锁定按钮后无法读取游戏画面，因此无法确认更改是否成功。",
                                         "The game screen could not be captured after clicking the lock button, so the change could not be confirmed.",
@@ -1053,12 +1044,12 @@ impl LockManager {
                             }
                         };
                         let verified = pixel_utils::verify_artifact_lock_toggled(
-                            &image, &scaler_cb, action.y_shift, action.desired_lock,
+                            &after, &scaler_cb, action.y_shift, target.desired_lock,
                         );
                         let new_lock = if verified {
-                            action.desired_lock
+                            target.desired_lock
                         } else {
-                            pixel_utils::detect_artifact_lock(&image, &scaler_cb, action.y_shift)
+                            pixel_utils::detect_artifact_lock(&after, &scaler_cb, action.y_shift)
                         };
                         update_scanned_lock_state(
                             &mut scanned_artifacts,
@@ -1067,17 +1058,13 @@ impl LockManager {
                         );
 
                         if dump_images {
-                            let ctx = DumpCtx::new(
-                                "debug_images", "manager_lock_verify", action_idx, "",
-                            );
-                            ctx.dump_full(&image);
-                            ctx.dump_pixel("lock_px", &image, ARTIFACT_LOCK_POS1, 5, &scaler_cb);
+                            dump_lock_panel("manager_lock_verify", action_idx, &after, action.y_shift, &scaler_cb);
                         }
-                        if new_lock == action.desired_lock {
+                        if new_lock == target.desired_lock {
                             results.insert(
-                                action.result_id.clone(),
+                                target.result_id.clone(),
                                 InstructionResult::outcome(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionStatus::Success,
                                 ),
                             );
@@ -1085,20 +1072,20 @@ impl LockManager {
                             log_warn!(
                                 "[lock_manager] 锁定验证失败 ({},{}): 期望={} 实际={}",
                                 "[lock_manager] Lock verify failed ({},{}): expected={} actual={}",
-                                action.row, action.col, action.desired_lock, new_lock
+                                action.row, action.col, target.desired_lock, new_lock
                             );
                             results.insert(
-                                action.result_id.clone(),
+                                target.result_id.clone(),
                                 InstructionResult::failure(
-                                    action.result_id.clone(),
+                                    target.result_id.clone(),
                                     InstructionStatus::UiError,
                                     format!(
                                         "游戏中的锁定状态没有变为请求的值（期望={}，实际={}）。",
-                                        action.desired_lock, new_lock
+                                        target.desired_lock, new_lock
                                     ),
                                     format!(
                                         "The in-game lock state did not change to the requested value (expected={}, actual={}).",
-                                        action.desired_lock, new_lock
+                                        target.desired_lock, new_lock
                                     ),
                                     None,
                                 ),
@@ -1139,28 +1126,26 @@ impl LockManager {
         let identity_failures = ocr_failures + solver_failures;
 
         log_debug!(
-            "[lock_manager] 扫描结束: {:?}, 已遍历位置={}, 未确认位置={}, 快速跳过位置={}, 识别失败={}",
-            "[lock_manager] Scan ended: {:?}, traversed positions={}, unconfirmed positions={}, shortcut-skipped positions={}, identity failures={}",
+            "[lock_manager] 扫描结束: {:?}, 已遍历位置={}, 未确认位置={}, 识别失败={}",
+            "[lock_manager] Scan ended: {:?}, traversed positions={}, unconfirmed positions={}, identity failures={}",
             scan_outcome.termination,
             scan_outcome.scanned_count,
             scan_outcome.missed_count,
-            scan_outcome.skipped_count,
             identity_failures
         );
 
         // Compute scan completeness from traversal, rather than the last OCR
         // success. Rarity early-stop counts as complete because a confirmed
         // low-rarity level-0 item is the logical end of the managed >=4★
-        // section. Fast mode remains partial because it may skip pages.
+        // section. A run that exits once all targets match is not a snapshot.
         let absence_confirmed = scan_proves_absence(
             scan_outcome.termination,
             rarity_stopped,
             scan_outcome.missed_count,
-            scan_outcome.skipped_count,
             identity_failures,
             scan_outcome.scanned_count,
             scan_bounds.observed_count,
-            filter_applied || filter_state_uncertain,
+            filter_applied || filter_state_uncertain || skipped_leading_page,
         );
         let scan_complete = !stop_on_all_matched && absence_confirmed && !ctrl.is_cancelled();
 
@@ -1219,6 +1204,33 @@ impl LockManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_confirmed_five_star_tail_above_every_target_can_skip_a_page() {
+        use crate::scanner::common::test_utils::{
+            make_1080p_image, make_1080p_scaler, paint_rarity_stars, FakeOcr,
+        };
+        let scaler = make_1080p_scaler();
+        for (rarity, text, highest, skip) in [
+            (5, "+20", 16, true),
+            (5, "+16", 16, false),
+            (5, "+12", 16, false),
+            (5, "2?", 0, false),
+            (4, "+16", 0, false),
+            (0, "+20", 0, false),
+        ] {
+            let mut image = make_1080p_image();
+            if rarity > 0 {
+                paint_rarity_stars(&mut image, rarity);
+            }
+            let ocr = FakeOcr::new(vec![text]);
+            assert_eq!(
+                page_tail_above_targets(&CaptureFrame::full(image), &scaler, &ocr, highest),
+                skip
+            );
+            assert_eq!(ocr.call_count(), usize::from(rarity == 5));
+        }
+    }
 
     #[test]
     fn panel_lock_overrides_false_unlocked_grid_before_unlock() {
@@ -1290,10 +1302,10 @@ mod tests {
 
     #[test]
     fn rarity_boundary_requires_a_confirmed_level_zero() {
-        assert!(should_stop_at_rarity_boundary(true, 0));
-        assert!(!should_stop_at_rarity_boundary(true, -1));
-        assert!(!should_stop_at_rarity_boundary(true, 1));
-        assert!(!should_stop_at_rarity_boundary(false, 0));
+        assert!(should_stop_at_rarity_boundary(true, Some(0)));
+        assert!(!should_stop_at_rarity_boundary(true, None));
+        assert!(!should_stop_at_rarity_boundary(true, Some(1)));
+        assert!(!should_stop_at_rarity_boundary(false, Some(0)));
 
         assert!(repeated_rarity_below_min(Some(3), Some(3), 4));
         assert!(!repeated_rarity_below_min(Some(3), Some(4), 4));
@@ -1308,7 +1320,6 @@ mod tests {
             false,
             0,
             0,
-            0,
             10_000,
             200,
             false,
@@ -1319,14 +1330,12 @@ mod tests {
             0,
             0,
             0,
-            0,
             200,
             false,
         ));
         assert!(scan_proves_absence(
             ScanTermination::EmptyCell,
             false,
-            0,
             0,
             0,
             200,
@@ -1340,7 +1349,6 @@ mod tests {
             false,
             0,
             0,
-            0,
             200,
             200,
             false,
@@ -1348,7 +1356,6 @@ mod tests {
         assert!(!scan_proves_absence(
             ScanTermination::UnchangedPage,
             false,
-            0,
             0,
             0,
             200,
@@ -1360,7 +1367,6 @@ mod tests {
             false,
             0,
             0,
-            0,
             199,
             200,
             false,
@@ -1370,7 +1376,6 @@ mod tests {
             false,
             0,
             0,
-            0,
             199,
             200,
             false,
@@ -1380,7 +1385,6 @@ mod tests {
             false,
             1,
             0,
-            0,
             200,
             200,
             false,
@@ -1390,7 +1394,6 @@ mod tests {
             false,
             0,
             1,
-            0,
             200,
             200,
             false,
@@ -1398,17 +1401,6 @@ mod tests {
         assert!(!scan_proves_absence(
             ScanTermination::EmptyCell,
             false,
-            0,
-            0,
-            1,
-            200,
-            200,
-            false,
-        ));
-        assert!(!scan_proves_absence(
-            ScanTermination::EmptyCell,
-            false,
-            0,
             0,
             0,
             200,
@@ -1419,7 +1411,6 @@ mod tests {
             ScanTermination::CaptureFailure,
             false,
             1,
-            0,
             0,
             200,
             200,

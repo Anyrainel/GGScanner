@@ -461,6 +461,11 @@ impl GenshinGameController {
         self.capturer.capture_rect(self.game_info.window)
     }
 
+    /// Page-level icon votes use only the backpack grid, in window coordinates.
+    pub fn capture_artifact_grid(&self) -> Result<RgbImage> {
+        self.capture_region(0.0, 0.0, 1310.0, 1080.0)
+    }
+
     /// Capture a sub-region of the game window.
     /// Coordinates are in base 1920x1080 and will be scaled.
     pub fn capture_region(

@@ -39,7 +39,7 @@ pub const DEFAULT_DELAY_GRID_ITEM: u64 = 125;
 pub const DEFAULT_WEAPON_PANEL_DELAY: u64 = 50;
 /// Artifact: initial wait (ms) after click before starting panel detection.
 pub const DEFAULT_ARTIFACT_INITIAL_WAIT: u64 = 20;
-/// Artifact: normal readiness timeout (ms), before bounded retry/recovery.
+/// Artifact: maximum wait after a click before reading the current detail panel.
 pub const DEFAULT_ARTIFACT_PANEL_TIMEOUT: u64 = 200;
 /// Artifact: minimum stable-detail hold (ms), revalidated throughout.
 pub const DEFAULT_ARTIFACT_EXTRA_DELAY: u64 = 0;
