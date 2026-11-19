@@ -16,6 +16,37 @@ pub struct Session {
     thread: Option<JoinHandle<()>>,
 }
 
+pub(super) fn refresh_genshin_world(
+    session: Option<&Session>,
+    state: &Mutex<genshin_scanner::capture::monitor::CaptureState>,
+    hdr_mode: bool,
+) -> anyhow::Result<()> {
+    use genshin_scanner::scanner::common::{game_controller::GenshinGameController, session_entry};
+    use std::time::{Duration, Instant};
+    anyhow::ensure!(session.is_some(), "Continuous capture is disabled");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        {
+            let capture = state.lock().expect("capture state poisoned");
+            if let Some(error) = &capture.error {
+                anyhow::bail!("Capture failed: {error}");
+            }
+            if capture.listener_ready {
+                break;
+            }
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Capture listener did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let game = genshin_scanner::cli::GoodScannerApplication::get_game_info()?;
+    let method = yas::capture::CaptureMethod::for_hdr_mode(hdr_mode);
+    let mut controller = GenshinGameController::new(game, method)?;
+    session_entry::enter_or_refresh_world(&mut controller)
+}
+
 impl Session {
     fn spawn(
         run: impl FnOnce(ContinuousCapture, Arc<AtomicBool>) -> anyhow::Result<()> + Send + 'static,

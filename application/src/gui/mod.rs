@@ -182,13 +182,15 @@ fn run_gui_with_agent_mode(agent_mode: bool) {
 }
 
 fn consume_agent_mode_marker() -> bool {
-    let marker = genshin_scanner::cli::exe_dir()
-        .join("data")
-        .join("ggscanner-agent-mode.once");
+    consume_marker("ggscanner-agent-mode.once", "agent-mode-v1")
+}
+
+fn consume_marker(name: &str, expected: &str) -> bool {
+    let marker = genshin_scanner::cli::exe_dir().join("data").join(name);
     let Ok(value) = std::fs::read_to_string(&marker) else {
         return false;
     };
-    if value.trim() != "agent-mode-v1" || std::fs::remove_file(marker).is_err() {
+    if value.trim() != expected || std::fs::remove_file(marker).is_err() {
         return false;
     }
     true
@@ -361,7 +363,9 @@ impl GuiApp {
                 self.state
                     .server_enabled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                self.server_handle = Some(worker::spawn_server(&self.state));
+                let refresh = cfg!(all(feature = "capture", target_os = "windows"))
+                    && consume_marker("ggscanner-genshin-world.once", "refresh-world-v1");
+                self.server_handle = Some(worker::spawn_genshin_server(&self.state, refresh));
             },
             Game::StarRail => {
                 let settings = &self.app_config.config.star_rail;

@@ -1052,6 +1052,12 @@ mod feedback_tests {
 
 /// Spawn the HTTP server on a background thread.
 pub fn spawn_server(state: &AppState) -> TaskHandle {
+    spawn_genshin_server(state, false)
+}
+
+pub(super) fn spawn_genshin_server(state: &AppState, refresh_world: bool) -> TaskHandle {
+    #[cfg(not(all(feature = "capture", target_os = "windows")))]
+    let _ = refresh_world;
     let status = state.server_status.clone();
     let job = state.server_job.clone();
     *job.lock().unwrap() = genshin_scanner::manager::models::JobState::idle();
@@ -1141,8 +1147,40 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
 
             #[cfg(all(feature = "capture", target_os = "windows"))]
             let continuous_session = user_config.continuous_capture.then(|| {
-                super::continuous_capture::Session::genshin(continuous_dir, continuous_state)
+                super::continuous_capture::Session::genshin(
+                    continuous_dir,
+                    continuous_state.clone(),
+                )
             });
+            // Run once, after the listener starts and before accepting scanner jobs.
+            #[cfg(all(feature = "capture", target_os = "windows"))]
+            if refresh_world {
+                let result = super::continuous_capture::refresh_genshin_world(
+                    continuous_session.as_ref(),
+                    &continuous_state,
+                    user_config.hdr_mode,
+                );
+                let report = match &result {
+                    Ok(()) => "ok".to_owned(),
+                    Err(error) => format!("stopped: {error:#}"),
+                };
+                let path =
+                    genshin_scanner::cli::exe_dir().join("data/ggscanner-genshin-world.result");
+                if let Err(error) = std::fs::write(&path, &report) {
+                    yas::log_warn!(
+                        "无法保存进入世界的结果：{}",
+                        "Could not save the world entry result: {}",
+                        error
+                    );
+                }
+                if let Err(error) = result {
+                    yas::log_warn!(
+                        "重新进入世界已停止：{}",
+                        "World entry stopped: {}",
+                        yas::lang::localize(&error.to_string())
+                    );
+                }
+            }
             #[cfg(all(feature = "capture", target_os = "windows"))]
             let continuous = continuous_session
                 .as_ref()

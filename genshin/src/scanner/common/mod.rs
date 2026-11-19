@@ -23,6 +23,7 @@ pub mod progress;
 pub mod roll_solver;
 pub mod scan_runner;
 pub mod scan_worker;
+pub mod session_entry;
 pub mod stat_parser;
 
 #[cfg(test)]
