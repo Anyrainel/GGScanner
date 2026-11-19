@@ -56,6 +56,7 @@ use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
 // use crate::gen::protos::GetPlayerTokenRsp;
 use crate::Key::Dispatch;
 use crate::r#gen::protos::PacketHead;
+pub use crate::identity::LoginLayout;
 use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
 pub use crate::unk_util::{
@@ -126,6 +127,10 @@ pub struct GameCommand {
     pub is_token_response: bool,
     /// Public game UID validated against this command's supported login layout.
     pub account_uid: Option<u32>,
+    /// Sanitized shape of a login response whose seed this decoder understood.
+    /// Present for a login response from any client build, accepted or not, so
+    /// diagnostics can explain which layer rejected an unrecognized client.
+    pub login_layout: Option<identity::LoginLayout>,
     #[allow(unused)]
     pub header_len: u16,
     #[allow(unused)]
@@ -170,6 +175,7 @@ impl GameCommand {
             direction,
             is_token_response: false,
             account_uid: None,
+            login_layout: None,
             header_len,
             data_len,
             header_data: bytes[Self::HEADER_LEN..body_start].to_vec(),
@@ -219,6 +225,7 @@ impl fmt::Debug for GameCommand {
             .field("command_id", &self.command_id)
             .field("direction", &self.direction)
             .field("is_token_response", &self.is_token_response)
+            .field("login_layout", &self.login_layout)
             .field("header_len", &self.header_len)
             .field("data_len", &self.data_len)
             .finish()
@@ -539,6 +546,7 @@ impl GameSniffer {
             {
                 command.is_token_response = true;
                 command.account_uid = identity::token_uid(&command.proto_data, &self.rsa_keys);
+                command.login_layout = identity::probe(&command.proto_data, &self.rsa_keys);
                 self.possible_seeds = possible_seeds;
                 info!(?self.possible_seeds, "setting new possible session seeds");
                 self.sent_time = command

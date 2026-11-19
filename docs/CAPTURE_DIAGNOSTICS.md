@@ -16,6 +16,7 @@ coexist with successfully decoded commands; it is not proof that every frame fai
 | Frames arriving, no decoded commands | Separate traffic and decoded-message counts; latest transport error and dispatch/session failures in diagnostics |
 | Decoded commands, login exchange missing | Handshake remains incomplete; capture a new login |
 | Login exchange captured, requested data missing | Per-category progress; open Genshin Achievements when requested; update the scanner if matching remains unsuccessful |
+| Login captured, game UID not verifiable | The hint names the rejection class: a rejected login asks for another attempt, an unreviewed layout asks for a client-build report. `loginLayout` in the diagnostics and copied error carries the sanitized field shape |
 | Five minutes without completion | Terminal timeout with progress / transport diagnostics; retry after correcting the reported stage |
 | Native crash, Rust panic, closed stream, unexpected worker exit | Failure card and log; completion cannot be inferred from worker termination |
 | Stop / close during initialization or capture | Stop cancels and retains task ownership through cleanup; no export success is reported |
