@@ -43,6 +43,9 @@ jobs:
       - name: Build GGScannerOCR (Release)
         run: cargo build --locked --release --bin GGScannerOCR
 
+      - name: Build GGScanner with Genshin packet capture (Release)
+        run: cargo build --locked --release --features capture --bin GGScanner
+
       - name: Test Linux platform and shared behavior
         run: |
           python3 scripts/check_platform_dependencies.py
@@ -50,10 +53,13 @@ jobs:
           cargo test --locked -p yas_core --features ort --lib
           xvfb-run -a cargo test --locked -p yas_core --test linux_x11 -- --ignored
           cargo test --locked -p genshin_scanner --lib
+          cargo test --locked -p genshin_scanner --features capture --lib capture::
           cargo test --locked -p hsr_scanner --lib
           xvfb-run -a cargo test --locked -p hsr_scanner --test linux_device -- --ignored
           cargo test --locked -p good_tools_app --features test-as-invoker --lib
           cargo test --locked -p good_tools_app --features test-as-invoker --test appearance --test gui_layout --test gui_feedback --test shared_games
+          cargo test --locked -p good_tools_app --features capture,test-as-invoker --lib
+          xvfb-run -a cargo test --locked -p good_tools_app --features capture,test-as-invoker --test shared_games --test gui_feedback
 
       - name: Package experimental Linux build
         run: |

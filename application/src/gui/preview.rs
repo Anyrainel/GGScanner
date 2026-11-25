@@ -153,12 +153,19 @@ pub fn run(
                 "ready" | "login" | "update" | "done" => {},
                 _ => panic!("unsupported preview scenario"),
             }
+            #[cfg(feature = "capture")]
+            if tab == ToolTab::Capture
+                && game == Game::Genshin
+                && !matches!(scenario.as_str(), "ready" | "update")
+            {
+                app.capture_tab.preview_feedback(&scenario);
+            }
             #[cfg(all(feature = "capture", target_os = "windows"))]
-            if tab == ToolTab::Capture && !matches!(scenario.as_str(), "ready" | "update") {
-                match game {
-                    Game::Genshin => app.capture_tab.preview_feedback(&scenario),
-                    Game::StarRail => app.star_rail.capture.preview_feedback(&scenario),
-                }
+            if tab == ToolTab::Capture
+                && game == Game::StarRail
+                && !matches!(scenario.as_str(), "ready" | "update")
+            {
+                app.star_rail.capture.preview_feedback(&scenario);
             }
             if scenario == "error" {
                 app.state.scanner_log_lines.push(super::state::LogEntry {

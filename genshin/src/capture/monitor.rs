@@ -49,6 +49,16 @@ const MIN_ACHIEVEMENT_ID: u64 = 80_000;
 const MAX_ACHIEVEMENT_ID_EXCLUSIVE: u64 = 100_000;
 const MIN_FINISH_TIMESTAMP: u64 = 1_500_000_000;
 const MAX_FINISH_TIMESTAMP: u64 = 4_102_444_800; // 2100-01-01 UTC
+
+/// Native packet source named in failure context, so a Linux capture never
+/// reports a `pktmon` error it cannot produce.
+#[cfg(target_os = "windows")]
+const CAPTURE_BACKEND: &str = "pktmon";
+#[cfg(target_os = "linux")]
+const CAPTURE_BACKEND: &str = "af_packet";
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+const CAPTURE_BACKEND: &str = "native";
+
 use crate::scanner::common::models::GoodExport;
 
 /// Commands the UI can send to the monitor.
@@ -157,19 +167,48 @@ pub struct CaptureMonitor {
     continuous: Option<crate::continuous::ContinuousCapture>,
 }
 
+/// Load the capture catalog without creating a nested runtime.
+///
+/// `game_data` fetches its catalog with a blocking HTTP client; building that
+/// client inside an async runtime makes reqwest drop a runtime in async
+/// context, which panics. Preparing on a plain thread keeps callers safe even
+/// if they initialize capture from inside a runtime.
+fn load_capture_data() -> Result<crate::game_data::types::DataCache> {
+    run_outside_runtime(|| {
+        crate::game_data::load()
+            .context("capture game data could not be loaded")
+            .map(|data| data.capture)
+    })
+}
+
+/// Run blocking preparation on a plain thread when the call site sits inside
+/// an async runtime.
+///
+/// The capture catalog downloads with `reqwest::blocking`, which builds and
+/// drops its own runtime; doing that on a runtime thread panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed".
+fn run_outside_runtime<T: Send + 'static>(
+    load: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::spawn(load)
+            .join()
+            .map_err(|_| anyhow!("capture preparation panicked"))?;
+    }
+    load()
+}
+
 impl CaptureMonitor {
     /// Initialize the monitor: load data cache, set up sniffer.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub fn new(state: Arc<Mutex<CaptureState>>, dump_packets: bool) -> Result<Self> {
-        yas::utils::ensure_admin()?;
+        yas::utils::packet_capture::ensure_capture_permission()?;
 
         log_info!(
             "正在加载抓包所需的游戏数据",
             "Loading game data for capture"
         );
-        let data_cache = crate::game_data::load()
-            .context("capture game data could not be loaded")?
-            .capture;
+        let data_cache = load_capture_data()?;
         let player_data = PlayerData::new(data_cache);
         log_info!("正在加载登录密钥", "Loading dispatch keys");
         let keys = load_keys().context("capture dispatch keys could not be loaded")?;
@@ -203,14 +242,14 @@ impl CaptureMonitor {
         })
     }
 
-    /// Non-Windows stub: the packet source (pktmon) is Windows-only, so
-    /// capture fails fast with a clear message instead of downloading the
-    /// data cache first.
-    #[cfg(not(target_os = "windows"))]
+    /// Unsupported-platform stub: there is no native packet source, so capture
+    /// fails fast with a clear message instead of downloading the data cache
+    /// first.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     pub fn new(state: Arc<Mutex<CaptureState>>, dump_packets: bool) -> Result<Self> {
         let _ = (&state, dump_packets);
         anyhow::bail!(
-            "Packet capture is Windows-only (pktmon); use OCR scanning on this platform."
+            "Packet capture has no native backend on this platform; use OCR scanning instead."
         );
     }
 
@@ -986,19 +1025,21 @@ async fn capture_task(
     Ok(())
 }
 
-/// Add user-facing operation context without flattening the nested pktmon error.
+/// Add user-facing operation context without flattening the native backend error.
 ///
 /// `CaptureError` predates `std::error::Error` support, but its variants retain
 /// the original `anyhow::Error`. Destructuring it here keeps that source chain
 /// available to the GUI's alternate (`{:#}`) formatter.
 fn capture_error_with_context(error: CaptureError, operation: &'static str) -> anyhow::Error {
     let error = match error {
-        CaptureError::Filter(source) => source.context("pktmon packet-filter setup failed"),
+        CaptureError::Filter(source) => {
+            source.context(format!("{CAPTURE_BACKEND} packet-filter setup failed"))
+        },
         CaptureError::Capture {
             has_captured,
             error: source,
         } => source.context(format!(
-            "pktmon capture failed (has_captured = {has_captured})"
+            "{CAPTURE_BACKEND} capture failed (has_captured = {has_captured})"
         )),
         CaptureError::CaptureClosed => anyhow!("packet capture stream closed"),
     };
@@ -1106,6 +1147,27 @@ fn load_keys() -> Result<HashMap<u16, Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blocking HTTP client owns a runtime; building one on a runtime thread
+    /// panics. Capture preparation must therefore leave the runtime first.
+    #[test]
+    fn capture_preparation_keeps_blocking_http_out_of_an_async_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let prepared = runtime.block_on(async {
+            run_outside_runtime(|| {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_millis(1))
+                    .build()
+                    .map_err(|error| anyhow!(error))?;
+                drop(client);
+                Ok(7u8)
+            })
+        });
+        assert_eq!(prepared.unwrap(), 7);
+    }
 
     #[test]
     fn diagnostics_distinguish_listener_traffic_decryption_and_missing_data() {
@@ -1369,9 +1431,11 @@ mod tests {
 
         assert_eq!(
             format!("{error:#}"),
-            "创建抓包失败 / Error creating packet capture: \
-             pktmon capture failed (has_captured = false): \
-             pktmon session start failed: windows error 5"
+            format!(
+                "创建抓包失败 / Error creating packet capture: \
+                 {CAPTURE_BACKEND} capture failed (has_captured = false): \
+                 pktmon session start failed: windows error 5"
+            )
         );
     }
 

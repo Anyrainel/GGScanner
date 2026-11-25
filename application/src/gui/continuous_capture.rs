@@ -77,6 +77,9 @@ impl Session {
         })
     }
 
+    /// Star Rail packet capture is still Windows-only, so this constructor is
+    /// only reachable from the Windows-gated Star Rail worker.
+    #[cfg(target_os = "windows")]
     pub fn star_rail(dir: PathBuf) -> Self {
         Self::spawn(move |latest, stop| {
             use hsr_scanner::packet_capture::{

@@ -52,12 +52,26 @@ impl ToolTab {
         }
     }
 
-    pub fn available_for_build(self) -> Self {
-        if self == Self::Capture && !cfg!(feature = "capture") {
+    /// Normalized page for one game: capture is offered only where the build
+    /// and that game both have a native backend.
+    pub fn available_for(self, game: Game) -> Self {
+        if self == Self::Capture && !capture_supported(game) {
             Self::Scanner
         } else {
             self
         }
+    }
+}
+
+/// Genshin capture runs on Windows (pktmon) and Linux (`AF_PACKET`); Star Rail
+/// capture is still Windows-only.
+fn capture_supported(game: Game) -> bool {
+    if !cfg!(feature = "capture") {
+        return false;
+    }
+    match game {
+        Game::Genshin => cfg!(any(target_os = "windows", target_os = "linux")),
+        Game::StarRail => cfg!(target_os = "windows"),
     }
 }
 
@@ -86,10 +100,10 @@ impl Default for GameNavigation {
 }
 impl GameNavigation {
     pub fn active_tab(&self) -> ToolTab {
-        self.selected_tab.available_for_build()
+        self.selected_tab.available_for(self.active_game)
     }
     pub fn select_tab(&mut self, tab: ToolTab) {
-        self.selected_tab = tab.available_for_build();
+        self.selected_tab = tab.available_for(self.active_game);
     }
 }
 

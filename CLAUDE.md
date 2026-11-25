@@ -90,7 +90,7 @@ src/
 ```
 src/capture/
 ├── mod.rs
-├── packet_capture.rs          # UDP capture via pktmon on ports 22101–22102
+├── packet_capture.rs          # UDP capture via pktmon (Windows) or AF_PACKET (Linux), ports 22101–22102
 ├── monitor.rs                 # CaptureMonitor: orchestrates capture, decryption, data accumulation
 ├── data_types.rs              # DataCache types (irminsul/anime-game-data format)
 ├── player_data.rs             # PlayerData: converts captured packets → GOOD v3 export
@@ -341,9 +341,12 @@ GGScanner is the merged binary (`GGScanner.exe`) with Capture, Scanner, and Mana
 cargo build --release --features capture --bin GGScanner
 ```
 
+On Linux the same command builds the capture edition; Genshin capture there
+requires `CAP_NET_RAW` on the executable. Star Rail capture stays Windows-only.
+
 ### How It Works
 
-1. Uses `pktmon` (Windows packet monitor) to capture UDP traffic on ports 22101–22102
+1. Windows uses `pktmon` (packet monitor driver); Linux opens raw `AF_PACKET` sockets with a BPF filter. Both keep only UDP traffic on ports 22101–22102
 2. `GameSniffer` (from `auto-artifactarium` crate) decrypts packets using dispatch keys from `keys/gi.json`
 3. `CaptureMonitor` uses **heuristic field-number-agnostic matching** — parses outer protobuf as generic `Unk`, tries every repeated length-delimited field as `Item` or `AvatarInfo`, picks the best match. This survives both command ID rotation AND outer field number changes across game versions.
 4. Auto-stops when both character and item packets are received
@@ -357,7 +360,8 @@ cargo build --release --features capture --bin GGScanner
 ### Dependencies (capture-only)
 
 - `auto-artifactarium` — packet decryption + protobuf types (from konkers/auto-artifactarium)
-- `pktmon` — Windows packet monitor driver interface
+- `pktmon` — Windows packet monitor driver interface (Windows targets only)
+- `libc` — `AF_PACKET` raw sockets (Linux targets only), needs `CAP_NET_RAW` via `setcap cap_net_raw+ep`
 - `protobuf` — protobuf parsing
 - `tokio` — async runtime for capture loop
 

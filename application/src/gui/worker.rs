@@ -1057,9 +1057,9 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
     *job.lock().unwrap() = genshin_scanner::manager::models::JobState::idle();
     let user_config = state.user_config.clone();
     let port = state.server_port;
-    #[cfg(all(feature = "capture", target_os = "windows"))]
+    #[cfg(feature = "capture")]
     let continuous_dir = std::path::PathBuf::from(&state.output_dir);
-    #[cfg(all(feature = "capture", target_os = "windows"))]
+    #[cfg(feature = "capture")]
     let continuous_state = {
         let shared = state.server_capture_state.clone();
         *shared.lock().expect("capture state poisoned") = Default::default();
@@ -1139,15 +1139,15 @@ pub fn spawn_server(state: &AppState) -> TaskHandle {
                 );
             });
 
-            #[cfg(all(feature = "capture", target_os = "windows"))]
+            #[cfg(feature = "capture")]
             let continuous_session = user_config.continuous_capture.then(|| {
                 super::continuous_capture::Session::genshin(continuous_dir, continuous_state)
             });
-            #[cfg(all(feature = "capture", target_os = "windows"))]
+            #[cfg(feature = "capture")]
             let continuous = continuous_session
                 .as_ref()
                 .map(|session| session.latest.clone());
-            #[cfg(not(all(feature = "capture", target_os = "windows")))]
+            #[cfg(not(feature = "capture"))]
             let continuous = None;
             match genshin_scanner::cli::run_server_core_observed_continuous(
                 &user_config,
