@@ -583,14 +583,29 @@ fn legacy_scan_guards_migrate_to_automatic_limits_and_total_timing_settings() {
 }
 
 #[test]
-fn unavailable_capture_tab_routes_to_scanner_without_erasing_saved_tab() {
+fn capture_tab_follows_per_game_backend_support_without_erasing_saved_tab() {
     let mut navigation = GameNavigation {
         active_game: Game::Genshin,
         selected_tab: ToolTab::Capture,
     };
 
+    // Genshin capture exists wherever this build compiled a native backend.
+    let genshin_capture = cfg!(all(
+        feature = "capture",
+        any(target_os = "windows", target_os = "linux")
+    ));
+    assert_eq!(
+        navigation.active_tab(),
+        if genshin_capture {
+            ToolTab::Capture
+        } else {
+            ToolTab::Scanner
+        }
+    );
+
+    // Star Rail capture is still Windows-only, so the shared tab falls back.
     navigation.active_game = Game::StarRail;
-    if cfg!(feature = "capture") {
+    if cfg!(all(feature = "capture", target_os = "windows")) {
         assert_eq!(navigation.active_tab(), ToolTab::Capture);
     } else {
         assert_eq!(navigation.active_tab(), ToolTab::Scanner);
@@ -599,6 +614,17 @@ fn unavailable_capture_tab_routes_to_scanner_without_erasing_saved_tab() {
         navigation.selected_tab,
         ToolTab::Capture,
         "runtime fallback must not erase GOODCapture's saved tab"
+    );
+
+    navigation.active_game = Game::Genshin;
+    assert_eq!(
+        navigation.active_tab(),
+        if genshin_capture {
+            ToolTab::Capture
+        } else {
+            ToolTab::Scanner
+        },
+        "returning to Genshin restores the saved capture tab"
     );
 }
 
@@ -845,6 +871,7 @@ fn stop_before_worker_start_never_opens_capture_boundary() {
     );
 }
 
+// Exclusive native-crash boundaries only exist where the SEH handler does.
 #[cfg(all(feature = "capture", target_os = "windows"))]
 #[test]
 fn genshin_capture_completion_releases_native_boundary_without_recapture_or_rendering() {

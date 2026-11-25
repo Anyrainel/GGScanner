@@ -302,45 +302,79 @@ fn star_rail_exports_need_no_folder_selection_and_preserve_saved_destinations() 
     assert!(!texts.iter().any(|(text, _, _)| text == "Output folder"));
 }
 
-#[cfg(all(feature = "capture", target_os = "windows"))]
+#[cfg(feature = "capture")]
 #[test]
 fn capture_forms_have_no_manual_or_folder_picker_and_start_with_actionable_guidance() {
-    use good_tools_app::gui::{
-        capture_tab::{self, CaptureTabState},
-        star_rail_capture_tab::{self, StarRailCaptureState},
-    };
+    use good_tools_app::gui::capture_tab::{self, CaptureTabState};
+
     let mut genshin = CaptureTabState::new(String::new());
+    let settings_text = render(|ui| capture_tab::show_settings(ui, Lang::En, &mut genshin, false));
+    assert!(!settings_text
+        .iter()
+        .any(|(text, _, _)| text == "How to use" || text == "Output folder"));
+    let status_text =
+        render(|ui| capture_tab::show_status(ui, Lang::En, &mut genshin, false, false));
+    assert!(status_text
+        .iter()
+        .any(|(text, _, _)| text == "Close the game first"));
+    assert!(!status_text
+        .iter()
+        .any(|(text, _, _)| text.contains("Import the file")));
+    assert!(!status_text.iter().any(|(text, _, _)| text == "Characters"
+        || text == "Login handshake"
+        || text == "Task status"));
+}
+
+#[cfg(all(feature = "capture", target_os = "windows"))]
+#[test]
+fn star_rail_capture_forms_start_with_actionable_guidance() {
+    use good_tools_app::gui::star_rail_capture_tab::{self, StarRailCaptureState};
+
     let mut settings = good_tools_app::config::StarRailSettings::default();
     let mut hsr = StarRailCaptureState::new(String::new());
-    for game in ["genshin", "hsr"] {
-        let settings_text = render(|ui| match game {
-            "genshin" => capture_tab::show_settings(ui, Lang::En, &mut genshin, false),
-            _ => star_rail_capture_tab::show_settings(ui, Lang::En, &mut settings, &mut hsr, false),
-        });
-        assert!(!settings_text
-            .iter()
-            .any(|(text, _, _)| text == "How to use" || text == "Output folder"));
-        let status_text = render(|ui| match game {
-            "genshin" => capture_tab::show_status(ui, Lang::En, &mut genshin, false, false),
-            _ => star_rail_capture_tab::show_status(
-                ui,
-                Lang::En,
-                &mut settings,
-                &mut hsr,
-                false,
-                false,
-            ),
-        });
-        assert!(status_text
-            .iter()
-            .any(|(text, _, _)| text == "Close the game first"));
-        assert!(!status_text
-            .iter()
-            .any(|(text, _, _)| text.contains("Import the file")));
-        assert!(!status_text.iter().any(|(text, _, _)| text == "Characters"
-            || text == "Login handshake"
-            || text == "Task status"));
+    let settings_text = render(|ui| {
+        star_rail_capture_tab::show_settings(ui, Lang::En, &mut settings, &mut hsr, false)
+    });
+    assert!(!settings_text
+        .iter()
+        .any(|(text, _, _)| text == "How to use" || text == "Output folder"));
+    let status_text = render(|ui| {
+        star_rail_capture_tab::show_status(ui, Lang::En, &mut settings, &mut hsr, false, false)
+    });
+    assert!(status_text
+        .iter()
+        .any(|(text, _, _)| text == "Close the game first"));
+}
+
+#[test]
+fn sidebar_offers_capture_only_where_the_game_has_a_backend() {
+    use good_tools_app::config::{Appearance, Game, GameNavigation, ToolTab};
+    use good_tools_app::gui::shell;
+
+    fn capture_visible(game: Game) -> bool {
+        let mut navigation = GameNavigation {
+            active_game: game,
+            selected_tab: ToolTab::Scanner,
+        };
+        let mut appearance = Appearance::System;
+        let mut lang = Lang::En;
+        let texts = render(|ui| shell::sidebar(ui, &mut lang, &mut navigation, &mut appearance));
+        texts.iter().any(|(text, _, _)| text == "Capture")
     }
+
+    assert_eq!(
+        capture_visible(Game::Genshin),
+        cfg!(all(
+            feature = "capture",
+            any(target_os = "windows", target_os = "linux")
+        )),
+        "Genshin capture exists on Windows and Linux builds that compiled a backend"
+    );
+    assert_eq!(
+        capture_visible(Game::StarRail),
+        cfg!(all(feature = "capture", target_os = "windows")),
+        "Star Rail capture keeps its Windows-only backend"
+    );
 }
 
 #[test]
@@ -366,7 +400,7 @@ fn compact_logs_preserve_warning_and_error_emphasis() {
         .any(|(text, _, color)| text.contains("ERROR_MARKER") && *color == theme::ERROR));
 }
 
-#[cfg(all(feature = "capture", target_os = "windows"))]
+#[cfg(feature = "capture")]
 #[test]
 fn failed_capture_write_displays_the_cause_and_never_shows_an_export_path() {
     use good_tools_app::gui::capture_tab::{self, CaptureTabState};

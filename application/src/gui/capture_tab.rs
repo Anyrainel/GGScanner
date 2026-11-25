@@ -339,27 +339,28 @@ fn spawn_capture(
                 },
             };
 
-            rt.block_on(async {
-                let monitor = match genshin_scanner::capture::monitor::CaptureMonitor::new(
-                    state.clone(),
-                    dump_packets,
-                ) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        yas::log_error!(
-                            "抓包器无法初始化。请检查下方完整错误。完整错误详情: {:#}",
-                            "Capture could not initialize. Check the complete error below. Full error details: {:#}",
-                            e,
-                        );
-                        if let Ok(mut s) = state.lock() {
-                            s.error = Some(format!("{:#}", e));
-                        }
-                        return Ok(None);
-                    },
-                };
+            // Prepare the monitor before entering the runtime: the game-data
+            // cache is fetched with a blocking HTTP client, which would create
+            // and drop its own runtime inside an async context.
+            let monitor = match genshin_scanner::capture::monitor::CaptureMonitor::new(
+                state.clone(),
+                dump_packets,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    yas::log_error!(
+                        "抓包器无法初始化。请检查下方完整错误。完整错误详情: {:#}",
+                        "Capture could not initialize. Check the complete error below. Full error details: {:#}",
+                        e,
+                    );
+                    if let Ok(mut s) = state.lock() {
+                        s.error = Some(format!("{:#}", e));
+                    }
+                    return Ok(None);
+                },
+            };
 
-                monitor.run(cmd_rx, settings).await
-            })
+            rt.block_on(monitor.run(cmd_rx, settings))
         }));
 
         if let Err(ref panic_info) = result {
@@ -430,11 +431,13 @@ pub fn show_settings(ui: &mut egui::Ui, l: Lang, tab: &mut CaptureTabState, is_b
 
 /// Start a fresh capture directly from either the initial or completed state.
 fn start_capture(tab: &mut CaptureTabState) {
-    if let Err(e) = super::privilege::ensure_admin_for_action() {
+    // Windows needs elevation (pktmon); Linux needs CAP_NET_RAW. The backend
+    // refuses capture on platforms without a native packet source.
+    if let Err(e) = yas::utils::packet_capture::ensure_capture_permission() {
         tab.phase = Phase::Failed(UiError::from_anyhow(
             UiText::new(
-                "抓包器需要管理员权限才能读取游戏网络数据。请以管理员身份重新启动程序。",
-                "Capture needs administrator access to read game network data. Restart the application as administrator.",
+                "抓包器无法读取游戏网络数据。请按完整错误中的说明授予抓包权限后重试。",
+                "Capture could not read game network data. Follow the full error details to grant capture access, then retry.",
             ),
             &e,
         ));

@@ -140,7 +140,7 @@ src/
 ```
 src/capture/
 ├── mod.rs
-├── packet_capture.rs          # UDP capture via pktmon on ports 22101–22102
+├── packet_capture.rs          # UDP capture via pktmon (Windows) or AF_PACKET (Linux), ports 22101–22102
 ├── monitor.rs                 # CaptureMonitor: orchestrates capture, decryption, data accumulation
 ├── data_cache.rs              # Downloads/caches data_cache.json from ggartifact.com
 ├── data_types.rs              # DataCache types (irminsul/anime-game-data format)
@@ -248,8 +248,8 @@ All help text is bilingual (Chinese + English). Flags are grouped into four sect
 - **Screen capture**: `screenshots` crate (with Win32 BitBlt primary path on Windows)
 - **Input simulation**: `enigo` crate
 - **Remote mappings**: `reqwest` (blocking HTTP to ggartifact.com)
-- **Windows only**: Requires admin, uses Win32 APIs for window detection; packet capture (`capture` feature) is Windows-only (pktmon)
-- **Linux** (experimental): native build supports OCR scanning + manager. See "Linux Platform Layer" below.
+- **Windows only**: Requires admin, uses Win32 APIs for window detection; Windows packet capture uses pktmon.
+- **Linux** (experimental): native build supports OCR scanning, manager and Genshin packet capture (`AF_PACKET`). See "Linux Platform Layer" below.
 
 ## Platform Architecture
 
@@ -278,7 +278,8 @@ All help text is bilingual (Chinese + English). Flags are grouped into four sect
 ## Linux Platform Layer
 
 - Linux-only code and dependencies must be isolated with `cfg(target_os = "linux")` and target-specific Cargo tables. Compare the Windows third-party dependency package/features set against main before pushing; the checker normalizes only the two retired local capture switches.
-- Build `GGScannerOCR` on Linux. The current shared GUI, Genshin OCR/manager and experimental HSR OCR/attended manager use X11/XWayland windows. Native wine-wayland windows, HDR, packet capture and self-update are unsupported. Do not advertise stubbed capture as available.
+- Build `GGScannerOCR` on Linux; `--features capture` also builds `GGScanner` with Genshin packet capture. The current shared GUI, Genshin OCR/manager and experimental HSR OCR/attended manager use X11/XWayland windows. Native wine-wayland windows, HDR, Star Rail packet capture and self-update are unsupported. Do not advertise a stubbed backend as available.
+- Genshin capture on Linux reads raw `AF_PACKET` frames (BPF: IPv4/UDP only) and requires `CAP_NET_RAW`, granted per executable with `setcap cap_net_raw+ep`. Rebuilding drops the grant. `yas::utils::packet_capture::ensure_capture_permission()` is the single permission gate shared by the capture tab and `CaptureMonitor::new`. Star Rail capture stays Windows-only.
 - `yas/src/utils/linux_x11.rs` owns discovery, root-coordinate geometry, focus, TrueColor capture decoding and XTEST; `system_control/linux/` owns XTEST/uinput injection. Linux input access is checked before navigation. No ydotool daemon is used.
 - Wayland uinput needs explicit device permissions; group membership alone does not grant access on every distro. See `docs/LINUX.md` for setup, boundaries and validation evidence.
 - Font discovery and the portal theme watcher compile only on Linux. Keep Windows font selection, system theme handling, scanning timing and stop policy unchanged.
@@ -434,7 +435,7 @@ Elixir artifacts display a purple banner ("祝圣之霜定义") that shifts all 
 
 ## GGScanner (Packet Capture Scanner)
 
-GGScanner is the merged binary (`GGScanner.exe`) with Capture, Scanner, and Manager tabs. It exports GOOD v3 data either by sniffing game network packets or by OCR. The standalone GGScannerOCR.exe remains available for users who do not need packet capture.
+GGScanner is the merged binary (`GGScanner.exe`) with Capture, Scanner, and Manager tabs. It exports GOOD v3 data either by sniffing game network packets or by OCR. The standalone GGScannerOCR.exe remains available for users who do not need packet capture. `--features capture --bin GGScanner` builds the same split on Linux, where Genshin capture needs `CAP_NET_RAW` (`setcap cap_net_raw+ep`) and Star Rail capture remains unavailable.
 
 ### Build
 
@@ -444,7 +445,7 @@ cargo build --release --features capture --bin GGScanner
 
 ### How It Works
 
-1. Uses `pktmon` (Windows packet monitor) to capture UDP traffic on ports 22101–22102
+1. Windows uses `pktmon` (packet monitor driver); Linux opens raw `AF_PACKET` sockets with a BPF filter. Both keep only UDP traffic on ports 22101–22102
 2. `GameSniffer` (from `auto-artifactarium` crate) decrypts packets using dispatch keys from `keys/gi.json`
 3. `CaptureMonitor` uses **heuristic field-number-agnostic matching** — parses outer protobuf as generic `Unk`, tries every repeated length-delimited field as `Item` or `AvatarInfo`, picks the best match. This survives both command ID rotation AND outer field number changes across game versions.
 4. Auto-stops when both character and item packets are received
@@ -458,7 +459,8 @@ cargo build --release --features capture --bin GGScanner
 ### Dependencies (capture-only)
 
 - `auto-artifactarium` — packet decryption + protobuf types (from konkers/auto-artifactarium)
-- `pktmon` — Windows packet monitor driver interface
+- `pktmon` — Windows packet monitor driver interface (Windows targets only)
+- `libc` — `AF_PACKET` raw sockets (Linux targets only)
 - `protobuf` — protobuf parsing
 - `tokio` — async runtime for capture loop
 

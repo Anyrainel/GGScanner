@@ -1,11 +1,13 @@
 # Linux port (experimental)
 
 `GGScannerOCR` is the native Linux executable, with the current shared GUI and
-CLI. Linux builds are CI artifacts, not additional public release downloads.
-CI packages the executable and this guide in a tar.gz to preserve Unix executable
-permissions. Public Windows downloads are `GGScanner.exe`, `GGScannerOCR.exe`, and
-`update.json`, plus old-name compatibility copies until 2026-11-21.
-Do not run a Windows updater asset on Linux.
+CLI. Building with `--features capture` produces `GGScanner`, which adds Genshin
+packet capture on top of the same GUI. Linux builds are CI artifacts, not
+additional public release downloads. CI packages the executable and this guide in
+a tar.gz to preserve Unix executable permissions. Public Windows downloads are
+`GGScanner.exe`, `GGScannerOCR.exe`, and `update.json`, plus old-name
+compatibility copies until 2026-11-21. Do not run a Windows updater asset on
+Linux.
 
 ## Mode boundaries
 
@@ -15,7 +17,8 @@ Do not run a Windows updater asset on Linux.
 | Genshin manager and HTTP scan API | Same controller and job/cache contracts | Core/API tests; no live lock/equip run |
 | Star Rail characters, light cones, relics OCR | Native device, shared OCR/scanner and HSR-Scanner v4 export | Experimental; simulated tests and X11 device fixture |
 | Star Rail attended relic manager | Same native device, geometry/focus checks and existing journal/plan rules | No live-game mutations tested |
-| Packet capture, either game | Windows only; Linux GUI hides capture even with `capture` enabled | Unsupported backend returns a platform error |
+| Genshin packet capture | Windows pktmon or Linux `AF_PACKET` raw sockets; only IPv4/UDP frames on ports 22101-22102 reach the shared decryption and GOOD export | Frame-filter unit tests; no live Linux game session |
+| Star Rail packet capture | Windows only | Unsupported backend returns a platform error |
 | HDR / native wine-wayland game windows | Unsupported | Use SDR and Wine/Proton X11/XWayland |
 | Self-update | Skipped on Linux | Rebuild or replace the native binary manually |
 
@@ -36,10 +39,14 @@ sudo apt-get install -y build-essential pkg-config libssl-dev libxdo-dev \
 rustup toolchain install 1.95.0 --profile minimal --component rustfmt
 git lfs pull
 cargo build --locked --release --bin GGScannerOCR
+cargo build --locked --release --features capture --bin GGScanner
 ./target/release/GGScannerOCR
 ./target/release/GGScannerOCR --all
 ./target/release/GGScannerOCR star-rail --help
 ```
+
+`GGScanner` adds Genshin packet capture to the same GUI. Both executables share
+one source tree; only the `capture` feature differs.
 
 Do not launch the GUI with `sudo`. System CJK fonts are discovered through
 fontdb only on Linux, including the collection face index. Missing fonts should
@@ -56,6 +63,43 @@ A configured library
 still has to load and support the models: file detection alone is not an
 inference test. An incompatible system install must be replaced or overridden
 with `ORT_DYLIB_PATH`.
+
+## Packet capture access
+
+Genshin capture uses an `AF_PACKET` raw socket per usable interface, with a
+small BPF program that keeps only IPv4/UDP frames and a userspace check for the
+game's ports. Raw sockets need `CAP_NET_RAW`; a normal desktop user has it only
+after an explicit grant. Check the current constraint with:
+
+```sh
+getcap ./target/release/GGScanner
+```
+
+Grant the capability to the executable instead of running the GUI as root:
+
+```sh
+sudo setcap cap_net_raw+ep ./target/release/GGScanner
+```
+
+Rebuilding replaces the file and drops the capability, so reapply it after each
+`cargo build`. The GUI probes the socket before starting a session and reports a
+bilingual error naming this exact command when the grant is missing.
+
+Capture behavior and limits:
+
+- Every interface that owns an IPv4 address is opened; a session stops when the
+  GUI asks it to, and sockets close only after the reader thread exits.
+- Only the handshake and login/inventory response frames are decrypted; the
+  shared `vendor/auto-artifactarium` code does that work on both platforms.
+- Proxies, TUN devices, VPNs or game traffic wrapped by another protocol can hide
+  or rewrite ports. If the session starts but never reports data, verify that the
+  frames on the interface still carry UDP 22101-22102.
+- Wine/Proton traffic stays on the host stack, so no extra plumbing is needed as
+  long as the game uses the host network directly.
+- Star Rail capture remains Windows-only; its tab is hidden on Linux even in a
+  `capture` build.
+- Capturing writes `.pcap` dumps only when the user asks for them; those files
+  contain account identifiers and should be treated as private.
 
 ## Input access
 
@@ -149,6 +193,9 @@ cargo test -p hsr_scanner --lib
 cargo test -p good_tools_app --features test-as-invoker --lib
 cargo test -p good_tools_app --features test-as-invoker \
   --test appearance --test gui_layout --test gui_feedback --test shared_games
+cargo test -p genshin_scanner --features capture --lib capture::
+xvfb-run -a cargo test -p good_tools_app --features capture,test-as-invoker \
+  --test shared_games --test gui_feedback
 ```
 
 No real Genshin/Star Rail Linux game session was available. KWin/Mutter device

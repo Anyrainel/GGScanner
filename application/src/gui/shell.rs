@@ -10,8 +10,10 @@ use eframe::egui;
 pub const TITLEBAR_HEIGHT: f32 = 48.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 128.0;
 
+/// Product name follows the built capabilities, not the platform: a capture
+/// build is GGScanner wherever its native backend runs.
 pub fn product_name() -> &'static str {
-    if cfg!(all(feature = "capture", target_os = "windows")) {
+    if cfg!(feature = "capture") {
         "GGScanner"
     } else {
         "GGScannerOCR"
@@ -246,9 +248,10 @@ pub fn sidebar(
                         (ToolTab::Scanner, "扫描器", "Scanner", Icon::Scan),
                         (ToolTab::Manager, "管理器", "Manager", Icon::Manager),
                     ] {
-                        if value == ToolTab::Capture
-                            && !cfg!(all(feature = "capture", target_os = "windows"))
-                        {
+                        // Capture is offered only where this build and the
+                        // active game have a native backend (Star Rail capture
+                        // is Windows-only).
+                        if value.available_for(navigation.active_game) != value {
                             continue;
                         }
                         let selected = tab == value;

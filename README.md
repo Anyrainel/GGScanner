@@ -73,16 +73,28 @@ GGScannerOCR.exe --characters --weapons  # 组合扫描
 
 ## Linux 支持（实验性）
 
-Linux 原生程序 `GGScannerOCR` 使用当前共用界面，提供原神 OCR 扫描与管理，以及实验性星穹铁道 OCR 扫描与遗器管理。游戏须通过 Wine/Proton 使用 X11/XWayland 窗口，并关闭 HDR。原生 Wayland 游戏窗口、抓包和自动更新暂不支持。
+Linux 原生程序使用当前共用界面，提供原神 OCR 扫描与管理、原神抓包，以及实验性星穹铁道 OCR 扫描与遗器管理。游戏须通过 Wine/Proton 使用 X11/XWayland 窗口，并关闭 HDR。原生 Wayland 游戏窗口和自动更新暂不支持；星穹铁道抓包仍仅支持 Windows。
 
-Ubuntu 构建依赖、XTEST/uinput 输入权限、字体、运行库安装和验证范围见 [Linux 指南](docs/LINUX.md)。无需安装 ydotool。
+默认构建的 `GGScannerOCR` 只含 OCR 与管理。需要原神抓包时另编带 `capture` 特性的 `GGScanner`：
 
 ```shell
 cargo build --locked --release --bin GGScannerOCR
-./target/release/GGScannerOCR         # 图形界面
+cargo build --locked --release --features capture --bin GGScanner
+./target/release/GGScannerOCR         # 图形界面（OCR 与管理）
+./target/release/GGScanner            # 图形界面（抓包 + OCR + 管理）
 ./target/release/GGScannerOCR --all   # 原神命令行扫描
 ./target/release/GGScannerOCR star-rail --help
 ```
+
+抓包直接读取网卡原始帧，需要 `CAP_NET_RAW`。推荐只给程序授权，而不是长期用 root 运行：
+
+```shell
+sudo setcap cap_net_raw+ep target/release/GGScanner
+```
+
+重新编译会替换可执行文件并丢掉该授权，需要重新执行一次。缺少权限时，“抓包器”页会在开始抓包时给出双语错误并附上同样的命令提示。
+
+Ubuntu 构建依赖、XTEST/uinput 输入权限、字体、运行库安装和验证范围见 [Linux 指南](docs/LINUX.md)。无需安装 ydotool。
 
 Linux 构建仅上传为 CI 测试产物，不改变正式发布页的 Windows 下载项。当前已验证 Linux 编译、自动测试与隔离图形会话；游戏实机扫描和不同 Wayland 合成器仍需验证。
 

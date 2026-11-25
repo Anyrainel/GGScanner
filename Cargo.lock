@@ -1921,6 +1921,7 @@ dependencies = [
  "indicatif",
  "indicatif-log-bridge",
  "lazy_static",
+ "libc",
  "libloading",
  "log",
  "pktmon",

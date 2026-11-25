@@ -1,8 +1,8 @@
-#[cfg(all(feature = "capture", target_os = "windows"))]
+#[cfg(feature = "capture")]
 mod capture_status;
-#[cfg(all(feature = "capture", target_os = "windows"))]
+#[cfg(feature = "capture")]
 pub mod capture_tab;
-#[cfg(all(feature = "capture", target_os = "windows"))]
+#[cfg(feature = "capture")]
 mod continuous_capture;
 pub mod credits;
 pub mod data_refresh;
@@ -54,9 +54,9 @@ pub fn run_gui_agent_mode() {
 }
 
 fn run_gui_with_agent_mode(agent_mode: bool) {
-    #[cfg(all(feature = "capture", target_os = "windows"))]
+    #[cfg(feature = "capture")]
     const PRODUCT_NAME: &str = "GGScanner";
-    #[cfg(not(all(feature = "capture", target_os = "windows")))]
+    #[cfg(not(feature = "capture"))]
     const PRODUCT_NAME: &str = "GGScannerOCR";
 
     if let Err(error) = restart::wait_for_update_parent() {
@@ -120,9 +120,9 @@ fn run_gui_with_agent_mode(agent_mode: bool) {
     genshin_scanner::updater::cleanup_old_exe();
 
     // Kick off background update check for the executable that is running.
-    #[cfg(all(feature = "capture", target_os = "windows"))]
+    #[cfg(feature = "capture")]
     const UPDATE_ASSET: &str = genshin_scanner::updater::ASSET_CAPTURE;
-    #[cfg(not(all(feature = "capture", target_os = "windows")))]
+    #[cfg(not(feature = "capture"))]
     const UPDATE_ASSET: &str = genshin_scanner::updater::ASSET_SCANNER;
     update_banner::spawn_check(UPDATE_ASSET, &state.update_state);
 
@@ -275,11 +275,23 @@ struct GuiApp {
     /// Latest theme reported by the desktop (linux watcher thread).
     #[cfg(target_os = "linux")]
     desktop_theme: Option<egui::Theme>,
-    #[cfg(all(feature = "capture", target_os = "windows"))]
+    #[cfg(feature = "capture")]
     capture_tab: capture_tab::CaptureTabState,
 }
 
 impl GuiApp {
+    /// Star Rail packet capture keeps a Windows-only backend, so its busy flag
+    /// must not force repaints or block actions on other platforms.
+    #[cfg(all(feature = "capture", target_os = "windows"))]
+    fn star_rail_capture_busy(&self) -> bool {
+        self.star_rail.capture.is_busy()
+    }
+
+    #[cfg(not(all(feature = "capture", target_os = "windows")))]
+    fn star_rail_capture_busy(&self) -> bool {
+        false
+    }
+
     fn new(
         state: AppState,
         app_config: ApplicationConfigStore,
@@ -290,7 +302,7 @@ impl GuiApp {
         >,
     ) -> Self {
         theme::install(ctx, app_config.config.appearance);
-        #[cfg(all(feature = "capture", target_os = "windows"))]
+        #[cfg(feature = "capture")]
         let capture_tab_state =
             capture_tab::CaptureTabState::from_config(state.output_dir.clone(), &state.user_config);
         let star_rail =
@@ -310,7 +322,7 @@ impl GuiApp {
             theme_rx,
             #[cfg(target_os = "linux")]
             desktop_theme: None,
-            #[cfg(all(feature = "capture", target_os = "windows"))]
+            #[cfg(feature = "capture")]
             capture_tab: capture_tab_state,
         };
         if agent_mode {
@@ -395,7 +407,7 @@ impl eframe::App for GuiApp {
         // Debounced auto-save: check if config changed and save after 300ms
         log_bridge::set_game_verbose(self.state.verbose, self.app_config.config.star_rail.verbose);
         if self.save_settings {
-            #[cfg(all(feature = "capture", target_os = "windows"))]
+            #[cfg(feature = "capture")]
             self.capture_tab.sync_to_config(&mut self.state.user_config);
             self.state.auto_save_tick();
             if let Err(error) = self.app_config.auto_save_tick() {
@@ -411,15 +423,15 @@ impl eframe::App for GuiApp {
         }
         #[cfg(all(feature = "capture", target_os = "windows"))]
         self.star_rail.capture.tick();
-        #[cfg(all(feature = "capture", target_os = "windows"))]
+        #[cfg(feature = "capture")]
         self.capture_tab.tick();
 
         self.data_refresh.poll();
         // Logic also runs while the viewport is hidden; keep capture/export
         // polling and debounced settings saves moving without painting a frame.
-        #[cfg(all(feature = "capture", target_os = "windows"))]
-        let capture_busy = self.capture_tab.is_busy() || self.star_rail.capture.is_busy();
-        #[cfg(not(all(feature = "capture", target_os = "windows")))]
+        #[cfg(feature = "capture")]
+        let capture_busy = self.capture_tab.is_busy() || self.star_rail_capture_busy();
+        #[cfg(not(feature = "capture"))]
         let capture_busy = false;
         if capture_busy
             || self.data_refresh.is_pending()
@@ -441,9 +453,9 @@ impl eframe::App for GuiApp {
             .server_handle
             .as_ref()
             .is_some_and(|handle| !handle.is_finished());
-        #[cfg(all(feature = "capture", target_os = "windows"))]
+        #[cfg(feature = "capture")]
         let is_capture_busy = self.capture_tab.is_busy();
-        #[cfg(not(all(feature = "capture", target_os = "windows")))]
+        #[cfg(not(feature = "capture"))]
         let is_capture_busy = false;
         let genshin_busy = is_scan_running || is_server_running || is_capture_busy;
         let star_rail_scan_running = self.star_rail.scan_running();
@@ -519,7 +531,7 @@ impl eframe::App for GuiApp {
                 .server_handle
                 .as_ref()
                 .is_some_and(TaskHandle::requires_restart);
-        #[cfg(all(feature = "capture", target_os = "windows"))]
+        #[cfg(feature = "capture")]
         let restart_required = restart_required || self.capture_tab.requires_restart();
         let restart_required = restart_required || self.star_rail.requires_restart();
 
@@ -591,7 +603,7 @@ impl eframe::App for GuiApp {
                         credits::show(
                             ui,
                             l,
-                            if cfg!(all(feature = "capture", target_os = "windows")) {
+                            if cfg!(feature = "capture") {
                                 credits::CreditSet::Full
                             } else {
                                 credits::CreditSet::Scanner
@@ -767,7 +779,7 @@ impl eframe::App for GuiApp {
                                     restart_required,
                                 )
                             },
-                            #[cfg(all(feature = "capture", target_os = "windows"))]
+                            #[cfg(feature = "capture")]
                             (Game::Genshin, ToolTab::Capture, layout::Pane::Settings) => {
                                 ui.add_enabled_ui(
                                     !restart_required
@@ -787,7 +799,7 @@ impl eframe::App for GuiApp {
                                 )
                                 .inner
                             },
-                            #[cfg(all(feature = "capture", target_os = "windows"))]
+                            #[cfg(feature = "capture")]
                             (Game::Genshin, ToolTab::Capture, layout::Pane::Status) => {
                                 capture_tab::show_status(
                                     ui,
@@ -869,7 +881,7 @@ impl eframe::App for GuiApp {
         if !self.save_settings {
             return;
         }
-        #[cfg(all(feature = "capture", target_os = "windows"))]
+        #[cfg(feature = "capture")]
         self.capture_tab.sync_to_config(&mut self.state.user_config);
         self.state.persist_config_now();
         if let Err(error) = self.app_config.persist_now() {
