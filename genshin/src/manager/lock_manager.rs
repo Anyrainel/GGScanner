@@ -5,7 +5,7 @@ use crossbeam_channel;
 
 use yas::{log_debug, log_info, log_warn};
 
-use super::ui_actions::d_cell;
+use super::ui_actions::{d_action, d_cell};
 use crate::scanner::artifact::{ArtifactScanResult, GoodArtifactScanner};
 use crate::scanner::common::annotator;
 use crate::scanner::common::artifact_panel::{
@@ -1025,31 +1025,96 @@ impl LockManager {
                             continue;
                         }
 
-                        yas::utils::sleep(d_cell() * 2);
-                        let after = match CaptureFrame::from_region(ctrl_cb, ARTIFACT_DETAIL_PANEL_RECT) {
-                            Ok(frame) => frame,
-                            Err(e) => {
-                                log_warn!("[lock_manager] 截图失败: {}", "[lock_manager] Capture failed: {}", e);
-                                results.insert(
-                                    target.result_id.clone(),
-                                    InstructionResult::failure(
-                                        target.result_id.clone(),
-                                        InstructionStatus::UiError,
-                                        "点击锁定按钮后无法读取游戏画面，因此无法确认更改是否成功。",
-                                        "The game screen could not be captured after clicking the lock button, so the change could not be confirmed.",
-                                        Some(&e),
-                                    ),
-                                );
-                                continue;
+                        // A lock click is a toggle, so never retry the click on
+                        // uncertain feedback. Wait for two consecutive, clear
+                        // observations of the same state before reporting it.
+                        // This avoids mistaking the icon animation for a failed
+                        // click (and then toggling the artifact back).
+                        let mut after = None;
+                        let mut previous_lock = None;
+                        let mut stable_reads = 0;
+                        let confirm_delay = (d_action() / 4).max(100);
+                        let mut capture_error = None;
+                        for _ in 0..8 {
+                            yas::utils::sleep(confirm_delay);
+                            match CaptureFrame::from_region(ctrl_cb, ARTIFACT_DETAIL_PANEL_RECT) {
+                                Ok(frame) => {
+                                    if pixel_utils::is_artifact_lock_ambiguous(
+                                        &frame,
+                                        &scaler_cb,
+                                        action.y_shift,
+                                    ) {
+                                        previous_lock = None;
+                                        stable_reads = 0;
+                                        after = Some(frame);
+                                        continue;
+                                    }
+                                    let observed = pixel_utils::detect_artifact_lock(
+                                        &frame,
+                                        &scaler_cb,
+                                        action.y_shift,
+                                    );
+                                    stable_reads = if previous_lock == Some(observed) {
+                                        stable_reads + 1
+                                    } else {
+                                        1
+                                    };
+                                    previous_lock = Some(observed);
+                                    after = Some(frame);
+                                    if stable_reads >= 2 {
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    capture_error = Some(error);
+                                    break;
+                                }
                             }
+                        }
+                        let Some(after) = after else {
+                            let error = capture_error
+                                .as_ref()
+                                .map(|e| e.to_string())
+                                .unwrap_or_else(|| "no confirmation frame was captured".to_owned());
+                            log_warn!("[lock_manager] 锁定状态确认截图失败: {}", "[lock_manager] Lock state confirmation capture failed: {}", error);
+                            results.insert(
+                                target.result_id.clone(),
+                                InstructionResult::failure(
+                                    target.result_id.clone(),
+                                    InstructionStatus::UiError,
+                                    "点击锁定按钮后无法读取游戏画面，因此无法确认更改是否成功。",
+                                    "The game screen could not be captured after clicking the lock button, so the change could not be confirmed.",
+                                    capture_error.as_ref(),
+                                ),
+                            );
+                            continue;
                         };
+                        if stable_reads < 2 {
+                            log_warn!("[lock_manager] 锁定动画后状态仍不稳定", "[lock_manager] Lock state remained unstable after the toggle animation");
+                            results.insert(
+                                target.result_id.clone(),
+                                InstructionResult::failure(
+                                    target.result_id.clone(),
+                                    InstructionStatus::UiError,
+                                    "锁定按钮已点击，但动画结束前无法确认最终状态。",
+                                    "The lock button was clicked, but the final state could not be confirmed after the animation.",
+                                    None,
+                                ),
+                            );
+                            continue;
+                        }
+                        let observed_lock =
+                            previous_lock.expect("two stable lock reads must have a state");
                         let verified = pixel_utils::verify_artifact_lock_toggled(
-                            &after, &scaler_cb, action.y_shift, target.desired_lock,
+                            &after,
+                            &scaler_cb,
+                            action.y_shift,
+                            target.desired_lock,
                         );
                         let new_lock = if verified {
                             target.desired_lock
                         } else {
-                            pixel_utils::detect_artifact_lock(&after, &scaler_cb, action.y_shift)
+                            observed_lock
                         };
                         update_scanned_lock_state(
                             &mut scanned_artifacts,

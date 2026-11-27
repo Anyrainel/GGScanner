@@ -819,6 +819,9 @@ const PANEL_POOL_RECT: (f64, f64, f64, f64) = (1330.0, 478.0, 370.0, 187.0);
 /// Delay between scroll ticks (milliseconds).
 const SCROLL_TICK_DELAY_MS: u32 = 10;
 
+/// Let the game retarget the wheel after the pointer is parked on the grid.
+const SCROLL_CURSOR_SETTLE_MS: u32 = 50;
+
 /// Minimum wait after all scroll ticks are sent, for animation to settle.
 const MIN_SCROLL_SETTLE_MS: u64 = 200;
 
@@ -840,6 +843,15 @@ fn scroll_ticks_for_rows(row_count: usize, completed_pages: u32) -> i32 {
 
 fn completed_page_turn_increment(row_count: usize) -> u32 {
     u32::from(row_count == GRID_ROWS)
+}
+
+/// Center of the backpack grid. The wheel hit-tests whatever is under the
+/// pointer, so a lock click on the detail panel would otherwise scroll nothing.
+fn inventory_scroll_cursor() -> (f64, f64) {
+    (
+        GRID_FIRST_X + (GRID_COLS / 2) as f64 * GRID_OFFSET_X,
+        GRID_FIRST_Y + (GRID_ROWS / 2) as f64 * GRID_OFFSET_Y,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,6 +954,11 @@ impl<'a> BackpackScanner<'a> {
     }
 
     fn send_scroll_ticks(&mut self, ticks: i32, settle_ms: u64) -> bool {
+        // Always park on the grid first. The pointer is often still on the
+        // detail panel after a lock click, and the wheel follows it.
+        let (x, y) = inventory_scroll_cursor();
+        self.ctrl.move_to(x, y);
+        utils::sleep(SCROLL_CURSOR_SETTLE_MS);
         // Send scroll ticks with small delays to avoid overwhelming the game.
         for i in 0..ticks {
             if self.ctrl.check_rmb() {
@@ -1814,6 +1831,17 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn inventory_scroll_parks_on_the_grid_center() {
+        assert_eq!(
+            inventory_scroll_cursor(),
+            (
+                GRID_FIRST_X + (GRID_COLS / 2) as f64 * GRID_OFFSET_X,
+                GRID_FIRST_Y + (GRID_ROWS / 2) as f64 * GRID_OFFSET_Y,
+            )
+        );
     }
 
     #[test]
