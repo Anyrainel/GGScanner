@@ -6,8 +6,8 @@
 
 - 新增原神与星铁持续同步，按 UID 匹配网站账号，并同步已移除的装备。
 - 单次与持续抓包均会校验 UID，避免不同账号的数据混在一起。
-- 适配星铁 4.7 抓包，并更新角色、光锥及遗器数据。
-- 改善圣遗物扫描与装备管理的识别稳定性，优化首次运行所需文件的下载。
+- 提升圣遗物背包扫描稳定性，并覆盖五星套装的四星版本。
+- 改进圣遗物锁定管理，并提升高分辨率下的识别稳定性。
 
 | 下载版本 | 功能 |
 | --- | --- |
@@ -26,8 +26,8 @@ In this update:
 
 - Added continuous sync for Genshin Impact and Star Rail, matching website accounts by UID and keeping removed gear in sync.
 - One-time and continuous captures now verify the account UID to keep accounts separate.
-- Updated Star Rail capture and Character, Light Cone, and Relic data for version 4.7.
-- Improved artifact scanning and gear management reliability, along with first-run downloads.
+- Improved artifact inventory scanning, including four-star versions of five-star sets.
+- Improved artifact lock management and scan reliability at high resolutions.
 
 | Download | Features |
 | --- | --- |
